@@ -51,6 +51,11 @@ export class PeerConnection {
     };
   }
 
+  // Expose pc for debugging
+  get peerConnection(): RTCPeerConnection {
+    return this.pc;
+  }
+
   /**
    * Create as sender (offerer): creates data channel and offer
    */

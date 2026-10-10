@@ -21,6 +21,32 @@ function base64urlDecode(str: string): Uint8Array {
 }
 
 /**
+ * Debug: Log ICE gathering state changes
+ */
+export function logICEGathering(pc: RTCPeerConnection, label: string) {
+  console.log(`[${label}] Initial iceGatheringState:`, pc.iceGatheringState);
+  
+  pc.onicegatheringstatechange = () => {
+    console.log(`[${label}] iceGatheringState changed to:`, pc.iceGatheringState);
+  };
+}
+
+/**
+ * Debug: Log SDP details
+ */
+export function logSDPDetails(sdp: string, label: string) {
+  const lines = sdp.split('\r\n');
+  const candidateLines = lines.filter(l => l.startsWith('a=candidate:'));
+  
+  console.log(`[${label}] SDP details:`);
+  console.log(`  - Total lines: ${lines.length}`);
+  console.log(`  - Candidate lines: ${candidateLines.length}`);
+  candidateLines.forEach((line, i) => {
+    console.log(`  - Candidate ${i + 1}: ${line}`);
+  });
+}
+
+/**
  * Minify SDP: keep only essential lines for host-only ICE
  */
 export function minifySDP(sdp: string): string {
@@ -80,9 +106,14 @@ export function minifySDP(sdp: string): string {
       ) {
         result.push(line);
       } else if (value.startsWith('candidate:')) {
-        // Keep only host candidates with IPv4
-        if (value.includes(' typ host') && !value.includes('::')) {
-          candidates.push(line);
+        // Keep all host candidates (IPv4, mDNS .local)
+        // Drop only IPv6 link-local (fe80::) and duplicates
+        if (value.includes(' typ host')) {
+          // Check if it's IPv6 link-local
+          const isIPv6LinkLocal = value.includes(' fe80:') || value.includes(' fe80::');
+          if (!isIPv6LinkLocal) {
+            candidates.push(line);
+          }
         }
       }
     }
@@ -92,7 +123,15 @@ export function minifySDP(sdp: string): string {
   const uniqueCandidates = [...new Set(candidates)];
   result.push(...uniqueCandidates);
 
-  return result.join('\r\n') + '\r\n';
+  const minified = result.join('\r\n') + '\r\n';
+  
+  // Debug logging
+  console.log('[SDP Minify] Original length:', sdp.length, 'chars');
+  console.log('[SDP Minify] Minified length:', minified.length, 'chars');
+  console.log('[SDP Minify] Candidates found:', candidates.length);
+  console.log('[SDP Minify] Unique candidates:', uniqueCandidates.length);
+  
+  return minified;
 }
 
 /**
@@ -101,7 +140,13 @@ export function minifySDP(sdp: string): string {
 export function encodePayload(data: object): string {
   const json = JSON.stringify(data);
   const compressed = deflate(new TextEncoder().encode(json));
-  return base64urlEncode(compressed);
+  const encoded = base64urlEncode(compressed);
+  
+  console.log('[Encode] JSON length:', json.length, 'chars');
+  console.log('[Encode] Compressed length:', compressed.length, 'bytes');
+  console.log('[Encode] Encoded length:', encoded.length, 'chars');
+  
+  return encoded;
 }
 
 /**
@@ -129,12 +174,15 @@ const FRAME_HEADER = 'LD'; // prefix
 
 export function createFrames(encoded: string): QRFrame[] {
   if (encoded.length <= MAX_QR_CHARS) {
+    console.log('[Frames] Single frame (encoded length:', encoded.length, '<= MAX', MAX_QR_CHARS, ')');
     return [{ index: 0, total: 1, data: encoded }];
   }
 
   const frames: QRFrame[] = [];
   const chunkSize = MAX_QR_CHARS - 20; // reserve space for header "LD{i}|{n}|"
   const total = Math.ceil(encoded.length / chunkSize);
+
+  console.log('[Frames] Multiple frames:', total, 'frames (encoded length:', encoded.length, ', chunk size:', chunkSize, ')');
 
   for (let i = 0; i < total; i++) {
     const start = i * chunkSize;

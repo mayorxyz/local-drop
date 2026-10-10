@@ -14,14 +14,18 @@ export function QRScan({ onFrame, onProgress, onError }: QRScanProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const animFrameRef = useRef<number>(0);
+  const mountedRef = useRef(false);
+  const startingRef = useRef(false);
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [scanning, setScanning] = useState(false);
   const collectedFrames = useRef<Map<number, QRFrame>>(new Map());
   const lastScanRef = useRef<string>('');
 
   const stopScanner = useCallback(() => {
+    console.log('[QRScan] Stopping scanner');
     if (animFrameRef.current) {
       cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = 0;
     }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(t => t.stop());
@@ -31,20 +35,49 @@ export function QRScan({ onFrame, onProgress, onError }: QRScanProps) {
   }, []);
 
   const startScanner = useCallback(async () => {
+    // Guard against double-start (StrictMode, rapid re-renders)
+    if (startingRef.current || streamRef.current) {
+      console.log('[QRScan] Already starting or started, skipping');
+      return;
+    }
+    
+    startingRef.current = true;
+    
     try {
+      console.log('[QRScan] Starting scanner');
       setPermissionDenied(false);
+      
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } },
       });
+      
+      // Check if component is still mounted
+      if (!mountedRef.current) {
+        console.log('[QRScan] Component unmounted during getUserMedia, stopping stream');
+        stream.getTracks().forEach(t => t.stop());
+        startingRef.current = false;
+        return;
+      }
+      
       streamRef.current = stream;
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
         setScanning(true);
+        startingRef.current = false;
+        console.log('[QRScan] Scanner started successfully');
         scanLoop();
+      } else {
+        console.log('[QRScan] Video ref not available, stopping stream');
+        stream.getTracks().forEach(t => t.stop());
+        streamRef.current = null;
+        startingRef.current = false;
       }
     } catch (err: any) {
+      console.error('[QRScan] Error starting scanner:', err);
+      startingRef.current = false;
+      
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
         setPermissionDenied(true);
         onError?.('Camera permission denied. Please use the "Paste code" option below.');
@@ -52,11 +85,18 @@ export function QRScan({ onFrame, onProgress, onError }: QRScanProps) {
         onError?.(`Camera error: ${err.message}`);
       }
     }
-  }, []);
+  }, [onError]);
 
   const scanLoop = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
+    
+    // Check if component is still mounted
+    if (!mountedRef.current) {
+      console.log('[QRScan] Component unmounted, stopping scan loop');
+      return;
+    }
+    
     if (!video || !canvas || video.readyState !== video.HAVE_ENOUGH_DATA) {
       animFrameRef.current = requestAnimationFrame(scanLoop);
       return;
@@ -77,14 +117,18 @@ export function QRScan({ onFrame, onProgress, onError }: QRScanProps) {
         if (barcodes.length > 0) {
           processScan(barcodes[0].rawValue);
         }
-        animFrameRef.current = requestAnimationFrame(scanLoop);
+        if (mountedRef.current) {
+          animFrameRef.current = requestAnimationFrame(scanLoop);
+        }
       }).catch(() => {
         // Fallback to jsQR
         const code = jsQR(imageData.data, imageData.width, imageData.height);
         if (code) {
           processScan(code.data);
         }
-        animFrameRef.current = requestAnimationFrame(scanLoop);
+        if (mountedRef.current) {
+          animFrameRef.current = requestAnimationFrame(scanLoop);
+        }
       });
     } else {
       // Use jsQR
@@ -92,7 +136,9 @@ export function QRScan({ onFrame, onProgress, onError }: QRScanProps) {
       if (code) {
         processScan(code.data);
       }
-      animFrameRef.current = requestAnimationFrame(scanLoop);
+      if (mountedRef.current) {
+        animFrameRef.current = requestAnimationFrame(scanLoop);
+      }
     }
   }, []);
 
@@ -109,8 +155,13 @@ export function QRScan({ onFrame, onProgress, onError }: QRScanProps) {
   };
 
   useEffect(() => {
+    console.log('[QRScan] Component mounted');
+    mountedRef.current = true;
     startScanner();
+    
     return () => {
+      console.log('[QRScan] Component unmounting');
+      mountedRef.current = false;
       stopScanner();
     };
   }, [startScanner, stopScanner]);
