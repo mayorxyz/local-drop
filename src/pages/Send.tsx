@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { PeerConnection, ConnectionState } from '../lib/peer';
-import { createAnswerPayload, decodePayload, parseFrame, reassembleFrames, QRFrame, logICEGathering, logSDPDetails } from '../lib/signaling';
+import { createOfferPayload, createAnswerPayload, decodePayload, parseFrame, reassembleFrames, QRFrame, logICEGathering, logSDPDetails } from '../lib/signaling';
 import { getDeviceName } from '../lib/storage';
 import { QRShow } from '../components/QRShow';
 import { QRScan } from '../components/QRScan';
@@ -18,23 +18,68 @@ export function Send({ onConnected, onBack }: SendProps) {
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
   const [pasteCode, setPasteCode] = useState('');
-  const [generating, setGenerating] = useState(false);
+  const [qrRendered, setQrRendered] = useState(false);
   const peerRef = useRef<PeerConnection | null>(null);
   const collectedFrames = useRef<Map<number, QRFrame>>(new Map());
 
-  // Request camera permission to expose real IPs (not mDNS)
-  const requestCameraPermission = useCallback(async () => {
-    try {
-      console.log('[Send] Requesting camera permission to expose real IPs');
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-      stream.getTracks().forEach(track => track.stop());
-      console.log('[Send] Camera permission granted, real IPs should be exposed');
-    } catch (err: any) {
-      console.warn('[Send] Camera permission denied, will use mDNS:', err.message);
-    }
+  // Create offer immediately on mount (Send = offerer)
+  useEffect(() => {
+    const createOffer = async () => {
+      console.log('[Send] Creating offer (Send = offerer)');
+      
+      // Request camera permission in parallel with 1500ms timeout for real IPs
+      const cameraPromise = (async () => {
+        try {
+          console.log('[Send] Requesting camera permission to expose real IPs');
+          const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+          stream.getTracks().forEach(track => track.stop());
+          console.log('[Send] Camera permission granted, real IPs should be exposed');
+        } catch (err: any) {
+          console.warn('[Send] Camera permission denied, will use mDNS:', err.message);
+        }
+      })();
+      
+      // Don't await camera - let it run in parallel with 1500ms timeout
+      Promise.race([
+        cameraPromise,
+        new Promise(resolve => setTimeout(resolve, 1500))
+      ]).catch(() => {});
+      
+      const peer = new PeerConnection({
+        onStateChange: setState,
+        onDataChannel: () => {}, // Offerer creates the channel
+        onError: (err) => setError(err.message),
+        onConnectionStateChange: () => {},
+      });
+      peerRef.current = peer;
+
+      try {
+        logICEGathering(peer.peerConnection, 'Send-Offer');
+        
+        const sdp = await peer.createOffer();
+        
+        console.log('[Send] Offer SDP created');
+        logSDPDetails(sdp, 'Send-Offer-Raw');
+        
+        const encoded = createOfferPayload(sdp);
+        
+        console.log('[Send] Offer encoded, length:', encoded.length);
+        
+        setQrData(encoded);
+        setQrRendered(true);
+        console.log('[Send] QR rendered:', true);
+      } catch (err: any) {
+        console.error('[Send] Error creating offer:', err);
+        setError(err.message);
+        setQrRendered(false);
+        console.log('[Send] QR rendered:', false);
+      }
+    };
+
+    createOffer();
   }, []);
 
-  const handleScanOfferFrame = useCallback((frame: QRFrame) => {
+  const handleScanAnswerFrame = useCallback((frame: QRFrame) => {
     console.log('[Send] Received frame', frame.index + 1, 'of', frame.total);
     collectedFrames.current.set(frame.index, frame);
 
@@ -44,91 +89,70 @@ export function Send({ onConnected, onBack }: SendProps) {
       if (encoded) {
         try {
           const payload = decodePayload(encoded);
-          if (payload.t === 'offer') {
-            console.log('[Send] Decoded offer, creating answer');
-            startAnswer(payload.sdp);
+          if (payload.t === 'answer' && peerRef.current) {
+            console.log('[Send] Decoded answer, setting remote description');
+            peerRef.current.setRemoteAnswer(payload.sdp).then(() => {
+              const checkConnection = setInterval(() => {
+                const ch = peerRef.current?.getDataChannel();
+                if (ch && ch.readyState === 'open') {
+                  clearInterval(checkConnection);
+                  console.log('[Send] Connection established, exchanging device names');
+                  
+                  const deviceName = getDeviceName();
+                  let peerDeviceName = '';
+                  
+                  const handleMessage = (event: MessageEvent) => {
+                    try {
+                      const msg = JSON.parse(event.data);
+                      if (msg.type === 'hello' && msg.deviceName) {
+                        peerDeviceName = msg.deviceName;
+                        ch.send(JSON.stringify({ type: 'hello-response', deviceName }));
+                        ch.removeEventListener('message', handleMessage);
+                        onConnected(ch, peerDeviceName);
+                      }
+                    } catch (e) {}
+                  };
+                  
+                  ch.addEventListener('message', handleMessage);
+                  ch.send(JSON.stringify({ type: 'hello', deviceName }));
+                  
+                  setTimeout(() => {
+                    ch.removeEventListener('message', handleMessage);
+                    onConnected(ch, peerDeviceName || 'Unknown');
+                  }, 3000);
+                }
+              }, 100);
+              
+              setTimeout(() => {
+                clearInterval(checkConnection);
+                if (!peerRef.current?.getDataChannel() || peerRef.current.getDataChannel()?.readyState !== 'open') {
+                  setError('Connection timed out. Make sure both devices are on the same network.');
+                }
+              }, 10000);
+            }).catch((err: Error) => setError(err.message));
           }
         } catch (err: any) {
-          setError(`Failed to decode offer: ${err.message}`);
+          setError(`Failed to decode answer: ${err.message}`);
         }
       }
     }
-  }, []);
-
-  const startAnswer = async (offerSdp: string) => {
-    setError('');
-    setGenerating(true);
-    
-    // Request camera permission to expose real IPs
-    await requestCameraPermission();
-    
-    const peer = new PeerConnection({
-      onStateChange: setState,
-      onDataChannel: (channel) => {
-        console.log('[Send] Data channel received');
-        const checkOpen = setInterval(() => {
-          if (channel.readyState === 'open') {
-            clearInterval(checkOpen);
-            console.log('[Send] Data channel open, exchanging device names');
-            
-            const deviceName = getDeviceName();
-            let peerDeviceName = '';
-            
-            const handleMessage = (event: MessageEvent) => {
-              try {
-                const msg = JSON.parse(event.data);
-                if (msg.type === 'hello' && msg.deviceName) {
-                  peerDeviceName = msg.deviceName;
-                  channel.send(JSON.stringify({ type: 'hello-response', deviceName }));
-                  channel.removeEventListener('message', handleMessage);
-                  onConnected(channel, peerDeviceName);
-                }
-              } catch (e) {}
-            };
-            
-            channel.addEventListener('message', handleMessage);
-            
-            setTimeout(() => {
-              channel.removeEventListener('message', handleMessage);
-              onConnected(channel, peerDeviceName || 'Unknown');
-            }, 3000);
-          }
-        }, 100);
-        setTimeout(() => clearInterval(checkOpen), 15000);
-      },
-      onError: (err) => setError(err.message),
-      onConnectionStateChange: () => {},
-    });
-    peerRef.current = peer;
-
-    try {
-      console.log('[Send] Creating answer');
-      logICEGathering(peer.peerConnection, 'Send-Answer');
-      
-      const answerSdp = await peer.createAnswer(offerSdp);
-      
-      console.log('[Send] Answer SDP created');
-      logSDPDetails(answerSdp, 'Send-Answer-Raw');
-      
-      const encoded = createAnswerPayload(answerSdp);
-      
-      console.log('[Send] Answer encoded, length:', encoded.length);
-      
-      setQrData(encoded);
-      setGenerating(false);
-      setStep(2);
-    } catch (err: any) {
-      console.error('[Send] Error creating answer:', err);
-      setError(err.message);
-      setGenerating(false);
-    }
-  };
+  }, [onConnected]);
 
   const handlePasteCode = useCallback((code: string) => {
     try {
       const payload = decodePayload(code);
-      if (payload.t === 'offer') {
-        startAnswer(payload.sdp);
+      if (payload.t === 'answer' && peerRef.current) {
+        peerRef.current.setRemoteAnswer(payload.sdp).then(() => {
+          const checkConnection = setInterval(() => {
+            const ch = peerRef.current?.getDataChannel();
+            if (ch && ch.readyState === 'open') {
+              clearInterval(checkConnection);
+            }
+          }, 100);
+          setTimeout(() => {
+            clearInterval(checkConnection);
+          }, 10000);
+        }).catch((err: Error) => setError(err.message));
       }
     } catch (err: any) {
       setError(`Invalid code: ${err.message}`);
@@ -162,12 +186,13 @@ export function Send({ onConnected, onBack }: SendProps) {
     setStep(1);
     setError('');
     setState('new');
-    setGenerating(false);
+    setQrRendered(false);
+    window.location.reload();
   };
 
   const statusBadge = () => {
     const statusMap = {
-      'new': { label: 'Waiting', status: 'idle' as const },
+      'new': { label: 'Ready', status: 'idle' as const },
       'connecting': { label: 'Connecting', status: 'warning' as const },
       'connected': { label: 'Connected', status: 'success' as const },
       'disconnected': { label: 'Disconnected', status: 'error' as const },
@@ -204,8 +229,8 @@ export function Send({ onConnected, onBack }: SendProps) {
           <div className="mb-3">
             <Tabs
               tabs={[
-                { id: '1', label: '1. Scan QR' },
-                { id: '2', label: '2. Show this QR' },
+                { id: '1', label: '1. Show this QR' },
+                { id: '2', label: '2. Scan reply' },
               ]}
               active={String(step)}
               onChange={() => {}}
@@ -230,44 +255,10 @@ export function Send({ onConnected, onBack }: SendProps) {
             </div>
           )}
 
-          {/* Step 1: Scan Offer */}
+          {/* Step 1: Show Offer QR */}
           {step === 1 && (
             <div className="flex flex-col items-center gap-3">
-              <p className="text-muted text-center" style={{ fontSize: '14px', marginBottom: '16px' }}>
-                Scan the QR code from the receiving device
-              </p>
-              <QRScan
-                onFrame={handleScanOfferFrame}
-                onError={(err) => setError(err)}
-              />
-              <div style={{ width: '100%', marginTop: '24px' }}>
-                <p className="text-muted text-center" style={{ fontSize: '13px', marginBottom: '12px' }}>
-                  Or paste the offer code
-                </p>
-                <textarea
-                  value={pasteCode}
-                  onChange={(e) => setPasteCode(e.target.value)}
-                  placeholder="Paste code here..."
-                  className="input"
-                  style={{ fontSize: '12px', fontFamily: 'monospace', minHeight: '80px' }}
-                />
-                <div className="flex gap-2 mt-2">
-                  <BtnAcid small onClick={() => handlePasteCode(pasteCode)} disabled={!pasteCode.trim()} style={{ flex: 1 }}>
-                    Submit
-                  </BtnAcid>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Step 2: Show Answer */}
-          {step === 2 && (
-            <div className="flex flex-col items-center gap-3">
-              {generating ? (
-                <div style={{ padding: '48px', textAlign: 'center' }}>
-                  <p className="text-muted">Generating QR code...</p>
-                </div>
-              ) : qrData ? (
+              {qrData ? (
                 <>
                   <p className="text-muted text-center" style={{ fontSize: '14px', marginBottom: '16px' }}>
                     Show this QR code to the receiving device
@@ -292,19 +283,49 @@ export function Send({ onConnected, onBack }: SendProps) {
                     <div className="flex gap-2 mt-2">
                       <BtnGhost small onClick={handleCopy} style={{ flex: 1 }}>
                         <IconCopy />
-                        {copied ? 'Copied' : 'Copy'}
+                        {copied ? 'Copied' : 'Copy code'}
                       </BtnGhost>
                     </div>
                   </div>
+                  <BtnAcid onClick={() => setStep(2)} style={{ width: '100%', marginTop: '16px' }}>
+                    Next: Scan reply →
+                  </BtnAcid>
                 </>
               ) : (
                 <div style={{ padding: '48px', textAlign: 'center' }}>
-                  <p className="text-muted">Error generating QR code</p>
-                  <p style={{ fontSize: '13px', color: 'var(--text-dim)', marginTop: '8px' }}>
-                    Use the paste code option below
-                  </p>
+                  <p className="text-muted">Generating QR code...</p>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Step 2: Scan Answer */}
+          {step === 2 && (
+            <div className="flex flex-col items-center gap-3">
+              <p className="text-muted text-center" style={{ fontSize: '14px', marginBottom: '16px' }}>
+                Scan the QR code from the receiving device
+              </p>
+              <QRScan
+                onFrame={handleScanAnswerFrame}
+                onError={(err) => setError(err)}
+              />
+              <div style={{ width: '100%', marginTop: '24px' }}>
+                <p className="text-muted text-center" style={{ fontSize: '13px', marginBottom: '12px' }}>
+                  Or paste the answer code
+                </p>
+                <textarea
+                  value={pasteCode}
+                  onChange={(e) => setPasteCode(e.target.value)}
+                  placeholder="Paste code here..."
+                  className="input"
+                  style={{ fontSize: '12px', fontFamily: 'monospace', minHeight: '80px' }}
+                />
+                <div className="flex gap-2 mt-2">
+                  <BtnAcid small onClick={() => handlePasteCode(pasteCode)} disabled={!pasteCode.trim()} style={{ flex: 1 }}>
+                    Submit
+                  </BtnAcid>
+                </div>
+              </div>
             </div>
           )}
         </Card>

@@ -21,11 +21,16 @@ export function QRShow({ payload }: QRShowProps) {
   useEffect(() => {
     if (frames.length <= 1) {
       if (canvasRef.current && frames.length === 1) {
-        QRCode.toCanvas(canvasRef.current, frameToString(frames[0]), {
-          width: 280,
-          margin: 1,
-          color: { dark: '#111111', light: '#FFFFFF' },
-        });
+        try {
+          QRCode.toCanvas(canvasRef.current, frameToString(frames[0]), {
+            width: 280,
+            margin: 1,
+            errorCorrectionLevel: 'L',
+            color: { dark: '#111111', light: '#FFFFFF' },
+          });
+        } catch (err) {
+          console.error('[QRShow] Error rendering QR:', err);
+        }
       }
       return;
     }
@@ -33,12 +38,17 @@ export function QRShow({ payload }: QRShowProps) {
     let idx = 0;
     const renderFrame = () => {
       if (canvasRef.current && frames[idx]) {
-        QRCode.toCanvas(canvasRef.current, frameToString(frames[idx]), {
-          width: 280,
-          margin: 1,
-          color: { dark: '#111111', light: '#FFFFFF' },
-        });
-        setCurrentFrame(idx);
+        try {
+          QRCode.toCanvas(canvasRef.current, frameToString(frames[idx]), {
+            width: 280,
+            margin: 1,
+            errorCorrectionLevel: 'L',
+            color: { dark: '#111111', light: '#FFFFFF' },
+          });
+          setCurrentFrame(idx);
+        } catch (err) {
+          console.error('[QRShow] Error rendering frame', idx, ':', err);
+        }
       }
       idx = (idx + 1) % frames.length;
     };
