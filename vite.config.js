@@ -13,9 +13,9 @@ export default defineConfig({
       manifest: {
         name: "LocalDrop - Offline File Transfer",
         short_name: "LocalDrop",
-        description: "Transfer files directly between devices over local Wi-Fi. No internet needed.",
-        theme_color: "#6366f1",
-        background_color: "#0f172a",
+        description: "Send files between any devices, no internet required.",
+        theme_color: "#D4FF00",
+        background_color: "#0E0E0E",
         display: "standalone",
         orientation: "portrait-primary",
         icons: [

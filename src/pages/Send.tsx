@@ -1,12 +1,10 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { PeerConnection, ConnectionState } from '../lib/peer';
-import { createOfferPayload, createAnswerPayload, decodePayload, encodePayload, parseFrame, reassembleFrames, QRFrame } from '../lib/signaling';
+import { createOfferPayload, createAnswerPayload, decodePayload, parseFrame, reassembleFrames, QRFrame } from '../lib/signaling';
 import { getDeviceName } from '../lib/storage';
 import { QRShow } from '../components/QRShow';
 import { QRScan } from '../components/QRScan';
-import { PasteCode } from '../components/PasteCode';
-import { DeviceBadge } from '../components/DeviceBadge';
-import { StatusBar } from '../components/StatusBar';
+import { Card, BtnAcid, BtnGhost, Badge, Tabs, IconArrowLeft, IconCopy, IconRefresh } from '../components/ui';
 
 interface SendProps {
   onConnected: (channel: RTCDataChannel, peerDeviceName?: string) => void;
@@ -18,9 +16,10 @@ export function Send({ onConnected, onBack }: SendProps) {
   const [state, setState] = useState<ConnectionState>('new');
   const [qrData, setQrData] = useState('');
   const [error, setError] = useState('');
+  const [copied, setCopied] = useState(false);
+  const [pasteCode, setPasteCode] = useState('');
   const peerRef = useRef<PeerConnection | null>(null);
   const collectedFrames = useRef<Map<number, QRFrame>>(new Map());
-  const expectedTotal = useRef(1);
 
   const startAsSender = useCallback(async () => {
     setError('');
@@ -36,7 +35,7 @@ export function Send({ onConnected, onBack }: SendProps) {
       const sdp = await peer.createOffer();
       const encoded = createOfferPayload(sdp);
       setQrData(encoded);
-      setStep(2); // Now waiting to scan answer
+      setStep(2);
     } catch (err: any) {
       setError(err.message);
     }
@@ -44,7 +43,6 @@ export function Send({ onConnected, onBack }: SendProps) {
 
   const handleScanFrame = useCallback((frame: QRFrame) => {
     collectedFrames.current.set(frame.index, frame);
-    expectedTotal.current = frame.total;
 
     if (collectedFrames.current.size >= frame.total) {
       const encoded = reassembleFrames(Array.from(collectedFrames.current.values()));
@@ -53,13 +51,11 @@ export function Send({ onConnected, onBack }: SendProps) {
           const payload = decodePayload(encoded);
           if (payload.t === 'answer' && peerRef.current) {
             peerRef.current.setRemoteAnswer(payload.sdp).then(() => {
-              // Wait for connection
               const checkConnection = setInterval(() => {
                 const ch = peerRef.current?.getDataChannel();
                 if (ch && ch.readyState === 'open') {
                   clearInterval(checkConnection);
                   
-                  // Set up device name exchange
                   const deviceName = getDeviceName();
                   let peerDeviceName = '';
                   
@@ -68,31 +64,23 @@ export function Send({ onConnected, onBack }: SendProps) {
                       const msg = JSON.parse(event.data);
                       if (msg.type === 'hello' && msg.deviceName) {
                         peerDeviceName = msg.deviceName;
-                        // Send our device name
                         ch.send(JSON.stringify({ type: 'hello-response', deviceName }));
                         ch.removeEventListener('message', handleMessage);
                         onConnected(ch, peerDeviceName);
                       }
-                    } catch (e) {
-                      // Ignore non-JSON messages
-                    }
+                    } catch (e) {}
                   };
                   
                   ch.addEventListener('message', handleMessage);
-                  
-                  // Send hello with our device name
                   ch.send(JSON.stringify({ type: 'hello', deviceName }));
                   
-                  // Timeout for device name exchange
                   setTimeout(() => {
                     ch.removeEventListener('message', handleMessage);
-                    // Even if no response, proceed with connection
                     onConnected(ch, peerDeviceName || 'Unknown');
                   }, 3000);
                 }
               }, 100);
               
-              // Timeout after 10s
               setTimeout(() => {
                 clearInterval(checkConnection);
                 if (!peerRef.current?.getDataChannel() || peerRef.current.getDataChannel()?.readyState !== 'open') {
@@ -118,7 +106,6 @@ export function Send({ onConnected, onBack }: SendProps) {
             if (ch && ch.readyState === 'open') {
               clearInterval(checkConnection);
               
-              // Set up device name exchange
               const deviceName = getDeviceName();
               let peerDeviceName = '';
               
@@ -131,9 +118,7 @@ export function Send({ onConnected, onBack }: SendProps) {
                     ch.removeEventListener('message', handleMessage);
                     onConnected(ch, peerDeviceName);
                   }
-                } catch (e) {
-                  // Ignore non-JSON messages
-                }
+                } catch (e) {}
               };
               
               ch.addEventListener('message', handleMessage);
@@ -155,6 +140,23 @@ export function Send({ onConnected, onBack }: SendProps) {
     }
   }, [onConnected]);
 
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(qrData);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = qrData;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
   const handleReconnect = () => {
     if (peerRef.current) {
       peerRef.current.close();
@@ -167,90 +169,143 @@ export function Send({ onConnected, onBack }: SendProps) {
     startAsSender();
   };
 
-  // Initialize on mount
   useEffect(() => {
     startAsSender();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const statusBadge = () => {
+    const statusMap = {
+      'new': { label: 'Ready', status: 'idle' as const },
+      'connecting': { label: 'Connecting', status: 'warning' as const },
+      'connected': { label: 'Connected', status: 'success' as const },
+      'disconnected': { label: 'Disconnected', status: 'error' as const },
+      'failed': { label: 'Failed', status: 'error' as const },
+      'closed': { label: 'Closed', status: 'idle' as const },
+    };
+    const { label, status } = statusMap[state];
+    return <Badge status={status}>{label}</Badge>;
+  };
+
   return (
-    <div className="flex flex-col items-center min-h-[100dvh] px-4 py-6">
-      {/* Header */}
-      <div className="flex items-center justify-between w-full max-w-md mb-4">
-        <button onClick={onBack} className="p-2 text-slate-400 hover:text-slate-200 transition-colors">
-          ← Back
-        </button>
-        <DeviceBadge editable={false} />
-      </div>
-
-      <h2 className="text-lg font-semibold text-slate-200 mb-4">Send Files</h2>
-
-      {/* Step indicator */}
-      <div className="flex items-center gap-2 mb-4">
-        <div className={`flex items-center gap-1 px-3 py-1 rounded-full text-xs font-medium ${step === 1 ? 'bg-indigo-600 text-white' : 'bg-slate-700 text-slate-400'}`}>
-          <span>1</span>
-          <span>Show offer</span>
-        </div>
-        <div className="w-4 h-px bg-slate-600" />
-        <div className={`flex items-center gap-1 px-3 py-1 rounded-full text-xs font-medium ${step === 2 ? 'bg-indigo-600 text-white' : 'bg-slate-700 text-slate-400'}`}>
-          <span>2</span>
-          <span>Scan answer</span>
-        </div>
-      </div>
-
-      {/* Connection state */}
-      <div className="mb-4">
-        <StatusBar state={state} />
-      </div>
-
-      {/* Error */}
-      {error && (
-        <div className="mb-4 p-3 bg-red-900/30 border border-red-700 rounded-lg max-w-md w-full">
-          <p className="text-sm text-red-300">{error}</p>
-          {state === 'failed' && (
-            <p className="text-xs text-red-400 mt-1">
-              💡 Both devices must be on the same hotspot. Disable client isolation / AP isolation.
-            </p>
-          )}
-        </div>
-      )}
-
-      {/* Step 1: Show QR offer */}
-      {step === 1 && qrData && (
-        <div className="flex flex-col items-center gap-4">
-          <QRShow data={qrData} label="Show this QR to the receiving device" />
-          <PasteCode codeToCopy={qrData} label="Or copy this code" onSubmit={() => {}} />
-        </div>
-      )}
-
-      {/* Step 2: Scan answer QR */}
-      {step === 2 && (
-        <div className="flex flex-col items-center gap-4 w-full max-w-md">
-          <QRScan
-            onFrame={handleScanFrame}
-            onProgress={(received, total) => {
-              // Could show progress indicator
-            }}
-            onError={(err) => setError(err)}
-          />
-          <div className="w-full border-t border-slate-700 pt-4">
-            <PasteCode
-              onSubmit={handlePasteCode}
-              label="Or paste the answer code from the other device"
-            />
+    <div className="page">
+      <div className="container" style={{ maxWidth: '600px' }}>
+        {/* Header */}
+        <div className="flex items-center justify-between mb-4">
+          <button
+            onClick={onBack}
+            className="btn-ghost btn-ghost-small"
+            style={{ padding: '10px' }}
+          >
+            <IconArrowLeft />
+          </button>
+          <div className="flex items-center gap-2">
+            <Badge>{getDeviceName()}</Badge>
+            {statusBadge()}
           </div>
         </div>
-      )}
 
-      {/* Reconnect */}
-      {state === 'failed' && (
-        <button
-          onClick={handleReconnect}
-          className="mt-6 px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm transition-colors"
-        >
-          🔄 Reconnect
-        </button>
-      )}
+        <h2 className="mb-3">Send Files</h2>
+
+        {/* Main Card */}
+        <Card className="mb-3">
+          {/* Step Tabs */}
+          <div className="mb-3">
+            <Tabs
+              tabs={[
+                { id: '1', label: '1. Show offer' },
+                { id: '2', label: '2. Scan answer' },
+              ]}
+              active={String(step)}
+              onChange={() => {}}
+            />
+          </div>
+
+          {/* Error */}
+          {error && (
+            <div style={{
+              background: 'rgba(239, 68, 68, 0.1)',
+              border: '1px solid rgba(239, 68, 68, 0.3)',
+              borderRadius: '12px',
+              padding: '16px',
+              marginBottom: '24px',
+            }}>
+              <p style={{ fontSize: '14px', color: '#EF4444', marginBottom: '8px' }}>{error}</p>
+              {state === 'failed' && (
+                <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
+                  Both devices must be on the same hotspot. Disable client isolation.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Step 1: Show QR */}
+          {step === 1 && qrData && (
+            <div className="flex flex-col items-center gap-3">
+              <p className="text-muted text-center" style={{ fontSize: '14px', marginBottom: '16px' }}>
+                Show this QR code to the receiving device
+              </p>
+              <div className="qr-container">
+                <QRShow payload={qrData} />
+              </div>
+              <div style={{ width: '100%', marginTop: '24px' }}>
+                <p className="text-muted text-center" style={{ fontSize: '13px', marginBottom: '12px' }}>
+                  Or copy and paste this code
+                </p>
+                <textarea
+                  value={qrData}
+                  readOnly
+                  className="input"
+                  style={{ fontSize: '12px', fontFamily: 'monospace', minHeight: '80px' }}
+                />
+                <div className="flex gap-2 mt-2">
+                  <BtnGhost small onClick={handleCopy} style={{ flex: 1 }}>
+                    <IconCopy />
+                    {copied ? 'Copied' : 'Copy'}
+                  </BtnGhost>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Step 2: Scan Answer */}
+          {step === 2 && (
+            <div className="flex flex-col items-center gap-3">
+              <p className="text-muted text-center" style={{ fontSize: '14px', marginBottom: '16px' }}>
+                Scan the QR code from the receiving device
+              </p>
+              <QRScan
+                onFrame={handleScanFrame}
+                onError={(err) => setError(err)}
+              />
+              <div style={{ width: '100%', marginTop: '24px' }}>
+                <p className="text-muted text-center" style={{ fontSize: '13px', marginBottom: '12px' }}>
+                  Or paste the answer code
+                </p>
+                <textarea
+                  value={pasteCode}
+                  onChange={(e) => setPasteCode(e.target.value)}
+                  placeholder="Paste code here..."
+                  className="input"
+                  style={{ fontSize: '12px', fontFamily: 'monospace', minHeight: '80px' }}
+                />
+                <div className="flex gap-2 mt-2">
+                  <BtnAcid small onClick={() => handlePasteCode(pasteCode)} disabled={!pasteCode.trim()} style={{ flex: 1 }}>
+                    Submit
+                  </BtnAcid>
+                </div>
+              </div>
+            </div>
+          )}
+        </Card>
+
+        {/* Reconnect */}
+        {state === 'failed' && (
+          <BtnGhost onClick={handleReconnect} style={{ width: '100%' }}>
+            <IconRefresh />
+            Reconnect
+          </BtnGhost>
+        )}
+      </div>
     </div>
   );
 }

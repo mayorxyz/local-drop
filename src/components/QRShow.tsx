@@ -3,43 +3,40 @@ import QRCode from 'qrcode';
 import { QRFrame, frameToString, createFrames } from '../lib/signaling';
 
 interface QRShowProps {
-  data: string;
-  label?: string;
+  payload: string;
 }
 
-export function QRShow({ data, label }: QRShowProps) {
+export function QRShow({ payload }: QRShowProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [frames, setFrames] = useState<QRFrame[]>([]);
   const [currentFrame, setCurrentFrame] = useState(0);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    const f = createFrames(data);
+    const f = createFrames(payload);
     setFrames(f);
     setCurrentFrame(0);
-  }, [data]);
+  }, [payload]);
 
   useEffect(() => {
     if (frames.length <= 1) {
-      // Single frame - render directly
       if (canvasRef.current && frames.length === 1) {
         QRCode.toCanvas(canvasRef.current, frameToString(frames[0]), {
           width: 280,
-          margin: 2,
-          color: { dark: '#1e293b', light: '#ffffff' },
+          margin: 1,
+          color: { dark: '#111111', light: '#FFFFFF' },
         });
       }
       return;
     }
 
-    // Multi-frame: cycle at 2fps
     let idx = 0;
     const renderFrame = () => {
       if (canvasRef.current && frames[idx]) {
         QRCode.toCanvas(canvasRef.current, frameToString(frames[idx]), {
           width: 280,
-          margin: 2,
-          color: { dark: '#1e293b', light: '#ffffff' },
+          margin: 1,
+          color: { dark: '#111111', light: '#FFFFFF' },
         });
         setCurrentFrame(idx);
       }
@@ -47,29 +44,31 @@ export function QRShow({ data, label }: QRShowProps) {
     };
 
     renderFrame();
-    intervalRef.current = setInterval(renderFrame, 500); // 2 fps
+    intervalRef.current = setInterval(renderFrame, 500);
 
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
   }, [frames]);
 
-  if (!data) return null;
+  if (!payload) return null;
 
   return (
-    <div className="flex flex-col items-center gap-3">
-      {label && <p className="text-sm text-slate-400">{label}</p>}
-      <div className="bg-white p-4 rounded-xl shadow-lg">
-        <canvas ref={canvasRef} />
-      </div>
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
+      <canvas ref={canvasRef} />
       {frames.length > 1 && (
-        <div className="flex items-center gap-2 text-xs text-slate-400">
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: 'var(--text-muted)' }}>
           <span>Frame {currentFrame + 1} / {frames.length}</span>
-          <div className="flex gap-0.5">
+          <div style={{ display: 'flex', gap: '2px' }}>
             {frames.map((_, i) => (
               <div
                 key={i}
-                className={`w-1.5 h-1.5 rounded-full ${i === currentFrame ? 'bg-indigo-500' : 'bg-slate-600'}`}
+                style={{
+                  width: '6px',
+                  height: '6px',
+                  borderRadius: '50%',
+                  background: i === currentFrame ? 'var(--accent)' : 'var(--border)',
+                }}
               />
             ))}
           </div>

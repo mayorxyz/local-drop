@@ -1,8 +1,12 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { TransferManager, TransferProgress, TransferMeta, HistoryItem, ReceivedText, saveFile } from '../lib/transfer';
 import { createZipFromFiles } from '../lib/zip';
-import { DropZone } from '../components/DropZone';
-import { TransferItem } from '../components/TransferItem';
+import { getDeviceName } from '../lib/storage';
+import { 
+  Card, BtnAcid, BtnGhost, Badge, ProgressBar, Tabs,
+  IconUpload, IconFolder, IconX, IconPause, IconPlay, IconRefresh,
+  IconDownload, IconCopy, IconArrowLeft, IconCheck, IconMessage
+} from '../components/ui';
 
 interface ConnectedProps {
   channel: RTCDataChannel;
@@ -20,6 +24,14 @@ interface ReceivedFile {
   verified?: boolean;
 }
 
+function formatSize(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
 export function Connected({ channel, role, peerDeviceName, onDisconnect }: ConnectedProps) {
   const [transfers, setTransfers] = useState<TransferProgress[]>([]);
   const [pendingFiles, setPendingFiles] = useState<{ id: string; name: string; size: number }[]>([]);
@@ -28,9 +40,12 @@ export function Connected({ channel, role, peerDeviceName, onDisconnect }: Conne
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [textMessage, setTextMessage] = useState('');
+  const [activeTab, setActiveTab] = useState('transfers');
+  const [dragOver, setDragOver] = useState(false);
   const managerRef = useRef<TransferManager | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
-  // Initialize transfer manager
   useEffect(() => {
     const manager = new TransferManager(channel, {
       onProgress: (progress: TransferProgress) => {
@@ -63,12 +78,11 @@ export function Connected({ channel, role, peerDeviceName, onDisconnect }: Conne
         setTransfers(prev => prev.map(t => t.id === id ? { ...t, status: 'failed' as const } : t));
       },
       onHistoryUpdate: (item: HistoryItem) => {
-        setHistory(prev => [item, ...prev].slice(0, 50)); // Keep last 50 items
+        setHistory(prev => [item, ...prev].slice(0, 50));
       },
     });
     managerRef.current = manager;
 
-    // Monitor channel state
     const checkState = setInterval(() => {
       if (channel.readyState !== 'open') {
         clearInterval(checkState);
@@ -76,7 +90,6 @@ export function Connected({ channel, role, peerDeviceName, onDisconnect }: Conne
       }
     }, 1000);
 
-    // Online/offline
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
     window.addEventListener('online', handleOnline);
@@ -90,31 +103,37 @@ export function Connected({ channel, role, peerDeviceName, onDisconnect }: Conne
     };
   }, [channel, onDisconnect]);
 
-  const handleFiles = useCallback(async (files: File[]) => {
+  const handleFiles = useCallback(async (files: FileList | File[]) => {
     if (!managerRef.current) return;
+    const fileArray = Array.from(files);
 
-    // Warn for large files on mobile
     const isMobile = /iPhone|iPad|Android/i.test(navigator.userAgent);
-    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+    const totalSize = fileArray.reduce((sum, f) => sum + f.size, 0);
     if (isMobile && totalSize > 1024 * 1024 * 1024) {
-      if (!confirm(`Warning: You're sending ${files.length} file(s) totaling ${(totalSize / (1024 * 1024 * 1024)).toFixed(1)} GB on a mobile device. Continue?`)) {
+      if (!confirm(`Warning: You're sending ${fileArray.length} file(s) totaling ${(totalSize / (1024 * 1024 * 1024)).toFixed(1)} GB on a mobile device. Continue?`)) {
         return;
       }
     }
 
-    for (const file of files) {
+    for (const file of fileArray) {
       await managerRef.current.enqueue(file);
     }
   }, []);
 
   const handleFolder = useCallback(async (files: File[]) => {
     if (!managerRef.current) return;
-
-    // Zip the folder
     const zipBlob = await createZipFromFiles(files);
     const zipFile = new File([zipBlob], 'folder.zip', { type: 'application/zip' });
     await managerRef.current.enqueue(zipFile);
   }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    if (e.dataTransfer.files.length > 0) {
+      handleFiles(e.dataTransfer.files);
+    }
+  }, [handleFiles]);
 
   const handleSendText = useCallback(() => {
     if (!managerRef.current || !textMessage.trim()) return;
@@ -133,7 +152,6 @@ export function Connected({ channel, role, peerDeviceName, onDisconnect }: Conne
 
   const handleCancel = useCallback((id: string) => {
     managerRef.current?.cancel(id);
-    setTransfers(prev => prev.map(t => t.id === id ? { ...t, status: 'cancelled' as const } : t));
   }, []);
 
   const handlePause = useCallback((id: string) => {
@@ -161,183 +179,295 @@ export function Connected({ channel, role, peerDeviceName, onDisconnect }: Conne
     }
   };
 
+  const connectionOpen = channel.readyState === 'open';
+
   return (
-    <div className="flex flex-col min-h-[100dvh] px-4 py-6">
-      {/* Header */}
-      <div className="flex items-center justify-between w-full max-w-lg mx-auto mb-6">
-        <button onClick={onDisconnect} className="p-2 text-slate-400 hover:text-slate-200 transition-colors text-sm">
-          ← Disconnect
-        </button>
-        <div className="flex items-center gap-2">
-          <span className={`w-2 h-2 rounded-full ${channel.readyState === 'open' ? 'bg-green-400' : 'bg-red-400'}`} />
-          <span className="text-sm text-slate-300">
-            {peerDeviceName ? `Connected to ${peerDeviceName}` : (role === 'sender' ? 'Sender' : 'Receiver')}
-          </span>
-        </div>
-        <div className="flex items-center gap-1">
-          {!isOnline && (
-            <span className="text-xs text-yellow-400">⚠ Offline</span>
-          )}
-        </div>
-      </div>
-
-      <div className="w-full max-w-lg mx-auto flex flex-col gap-6">
-        {/* Drop zone */}
-        <DropZone onFiles={handleFiles} onFolder={handleFolder} />
-
-        {/* Text message input */}
-        <div className="flex gap-2">
-          <input
-            type="text"
-            value={textMessage}
-            onChange={(e) => setTextMessage(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleSendText()}
-            placeholder="Send a message or link..."
-            className="flex-1 px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
-          />
+    <div className="page">
+      <div className="container" style={{ maxWidth: '800px' }}>
+        {/* Header */}
+        <div className="flex items-center justify-between mb-4">
           <button
-            onClick={handleSendText}
-            disabled={!textMessage.trim()}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 disabled:text-slate-500 rounded-lg text-sm font-medium transition-colors"
+            onClick={onDisconnect}
+            className="btn-ghost btn-ghost-small"
+            style={{ padding: '10px' }}
           >
-            Send
+            <IconArrowLeft />
           </button>
+          <div className="flex items-center gap-2">
+            <Badge>{getDeviceName()}</Badge>
+            <Badge status={connectionOpen ? 'success' : 'error'}>
+              {peerDeviceName || (role === 'sender' ? 'Sender' : 'Receiver')}
+            </Badge>
+            {!isOnline && <Badge status="warning">Offline</Badge>}
+          </div>
         </div>
 
-        {/* Pending incoming files */}
-        {pendingFiles.length > 0 && (
-          <div className="space-y-2">
-            <h3 className="text-sm font-medium text-slate-300">Incoming files</h3>
+        {/* Drop Zone */}
+        <div
+          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={handleDrop}
+          onClick={() => fileInputRef.current?.click()}
+          className={`dropzone ${dragOver ? 'dropzone-active' : ''} mb-3`}
+          style={{ cursor: 'pointer' }}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            style={{ display: 'none' }}
+            onChange={(e) => e.target.files && handleFiles(e.target.files)}
+          />
+          <input
+            ref={folderInputRef}
+            type="file"
+            multiple
+            {...({ webkitdirectory: '', directory: '' } as any)}
+            style={{ display: 'none' }}
+            onChange={(e) => e.target.files && handleFolder(Array.from(e.target.files))}
+          />
+          <div className="dropzone-icon">
+            <IconUpload />
+          </div>
+          <p className="dropzone-text">Drop files or folders here</p>
+          <p className="dropzone-hint">or click to browse</p>
+          <div className="flex gap-2 justify-center mt-3" onClick={(e) => e.stopPropagation()}>
+            <BtnGhost small onClick={() => fileInputRef.current?.click()}>
+              Browse Files
+            </BtnGhost>
+            <BtnGhost small onClick={() => folderInputRef.current?.click()}>
+              <IconFolder />
+              Browse Folder
+            </BtnGhost>
+          </div>
+        </div>
+
+        {/* Text Message Input */}
+        <Card className="mb-3">
+          <div className="flex items-center gap-2 mb-2">
+            <IconMessage />
+            <span style={{ fontSize: '14px', fontWeight: 600 }}>Send a message</span>
+          </div>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={textMessage}
+              onChange={(e) => setTextMessage(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSendText()}
+              placeholder="Type a message or paste a link..."
+              className="input"
+              style={{ flex: 1 }}
+            />
+            <BtnAcid small onClick={handleSendText} disabled={!textMessage.trim()}>
+              Send
+            </BtnAcid>
+          </div>
+        </Card>
+
+        {/* Tabs */}
+        <div className="mb-3">
+          <Tabs
+            tabs={[
+              { id: 'transfers', label: 'Transfers' },
+              { id: 'received', label: `Received (${receivedFiles.length + receivedTexts.length})` },
+              { id: 'history', label: 'History' },
+            ]}
+            active={activeTab}
+            onChange={setActiveTab}
+          />
+        </div>
+
+        {/* Transfers Tab */}
+        {activeTab === 'transfers' && (
+          <div className="flex flex-col gap-2">
+            {/* Pending incoming */}
             {pendingFiles.map(file => (
-              <div key={file.id} className="flex items-center justify-between p-3 bg-slate-800/50 border border-slate-700 rounded-lg">
-                <div className="flex flex-col">
-                  <span className="text-sm text-slate-200 truncate max-w-[200px]">{file.name}</span>
-                  <span className="text-xs text-slate-400">{(file.size / (1024 * 1024)).toFixed(1)} MB</span>
+              <Card key={file.id} className="transfer-item">
+                <div className="transfer-header">
+                  <div>
+                    <div className="transfer-name">{file.name}</div>
+                    <div className="transfer-size">{formatSize(file.size)}</div>
+                  </div>
+                  <div className="transfer-actions">
+                    <BtnAcid small onClick={() => handleAccept(file.id)}>
+                      <IconCheck />
+                      Accept
+                    </BtnAcid>
+                    <BtnGhost small onClick={() => handleReject(file.id)}>
+                      <IconX />
+                      Reject
+                    </BtnGhost>
+                  </div>
                 </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => handleAccept(file.id)}
-                    className="px-3 py-1.5 bg-green-600 hover:bg-green-500 rounded text-xs font-medium transition-colors"
-                  >
-                    Accept
-                  </button>
-                  <button
-                    onClick={() => handleReject(file.id)}
-                    className="px-3 py-1.5 bg-red-600 hover:bg-red-500 rounded text-xs font-medium transition-colors"
-                  >
-                    Reject
-                  </button>
-                </div>
-              </div>
+              </Card>
             ))}
-          </div>
-        )}
 
-        {/* Active transfers */}
-        {transfers.length > 0 && (
-          <div className="space-y-2">
-            <h3 className="text-sm font-medium text-slate-300">Transfers</h3>
+            {/* Active transfers */}
             {transfers.map(t => (
-              <TransferItem
-                key={t.id}
-                transfer={t}
-                onCancel={handleCancel}
-                onPause={handlePause}
-                onResume={handleResume}
-              />
+              <Card key={t.id} className="transfer-item">
+                <div className="transfer-header">
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="transfer-name">{t.name}</div>
+                    <div className="transfer-size">
+                      {formatSize(t.transferred)} / {formatSize(t.size)}
+                      {t.sha256 && t.status === 'complete' && (
+                        <span style={{ marginLeft: '8px', color: t.verified ? 'var(--success)' : '#EF4444' }}>
+                          {t.verified ? 'Verified' : 'Mismatch'}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="transfer-actions">
+                    {(t.status === 'sending' || t.status === 'receiving') && (
+                      <>
+                        <BtnGhost small onClick={() => handlePause(t.id)} style={{ padding: '8px' }}>
+                          <IconPause />
+                        </BtnGhost>
+                        <BtnGhost small onClick={() => handleCancel(t.id)} style={{ padding: '8px' }}>
+                          <IconX />
+                        </BtnGhost>
+                      </>
+                    )}
+                    {t.status === 'paused' && (
+                      <>
+                        <BtnGhost small onClick={() => handleResume(t.id)} style={{ padding: '8px' }}>
+                          <IconPlay />
+                        </BtnGhost>
+                        <BtnGhost small onClick={() => handleCancel(t.id)} style={{ padding: '8px' }}>
+                          <IconX />
+                        </BtnGhost>
+                      </>
+                    )}
+                    {t.status === 'failed' && (
+                      <BtnGhost small onClick={() => handleCancel(t.id)} style={{ padding: '8px' }}>
+                        <IconRefresh />
+                      </BtnGhost>
+                    )}
+                  </div>
+                </div>
+                <ProgressBar
+                  value={t.size > 0 ? (t.transferred / t.size) * 100 : 0}
+                  speed={t.speed}
+                  eta={t.eta}
+                  status={t.status}
+                />
+              </Card>
             ))}
+
+            {pendingFiles.length === 0 && transfers.length === 0 && (
+              <Card style={{ textAlign: 'center', padding: '48px 24px' }}>
+                <p className="text-muted">No active transfers</p>
+                <p className="text-dim" style={{ fontSize: '13px', marginTop: '8px' }}>
+                  Drop files above to start sending
+                </p>
+              </Card>
+            )}
           </div>
         )}
 
-        {/* Received texts */}
-        {receivedTexts.length > 0 && (
-          <div className="space-y-2">
-            <h3 className="text-sm font-medium text-slate-300">Received messages</h3>
+        {/* Received Tab */}
+        {activeTab === 'received' && (
+          <div className="flex flex-col gap-2">
+            {/* Received texts */}
             {receivedTexts.map(text => (
-              <div key={text.id} className="p-3 bg-slate-800/50 border border-slate-700 rounded-lg">
+              <Card key={text.id} className="transfer-item">
                 <div className="flex items-start justify-between gap-2">
-                  <div className="flex-1 min-w-0">
+                  <div style={{ flex: 1, minWidth: 0 }}>
                     {isUrl(text.body) ? (
                       <a
                         href={text.body}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-indigo-400 hover:text-indigo-300 text-sm break-all"
+                        style={{ color: 'var(--accent)', wordBreak: 'break-all', fontSize: '14px' }}
                       >
                         {text.body}
                       </a>
                     ) : (
-                      <p className="text-sm text-slate-200 break-words">{text.body}</p>
+                      <p style={{ fontSize: '14px', wordBreak: 'break-word' }}>{text.body}</p>
                     )}
-                    <span className="text-xs text-slate-500 mt-1">
+                    <div className="text-dim" style={{ fontSize: '12px', marginTop: '4px' }}>
                       {new Date(text.timestamp).toLocaleTimeString()}
-                    </span>
+                    </div>
                   </div>
-                  <button
-                    onClick={() => handleCopyText(text.body)}
-                    className="px-2 py-1 bg-slate-700 hover:bg-slate-600 rounded text-xs transition-colors"
-                    title="Copy"
-                  >
-                    📋
-                  </button>
+                  <BtnGhost small onClick={() => handleCopyText(text.body)} style={{ padding: '8px' }}>
+                    <IconCopy />
+                  </BtnGhost>
                 </div>
-              </div>
+              </Card>
             ))}
-          </div>
-        )}
 
-        {/* Received files */}
-        {receivedFiles.length > 0 && (
-          <div className="space-y-2">
-            <h3 className="text-sm font-medium text-slate-300">Received files</h3>
+            {/* Received files */}
             {receivedFiles.map(file => (
-              <div key={file.id} className="flex items-center justify-between p-3 bg-slate-800/50 border border-slate-700 rounded-lg">
-                <div className="flex flex-col">
-                  <span className="text-sm text-slate-200 truncate max-w-[200px]">{file.name}</span>
-                  <div className="flex items-center gap-2 text-xs text-slate-400">
-                    <span>{(file.size / (1024 * 1024)).toFixed(1)} MB</span>
-                    {file.sha256 && (
-                      <span className={file.verified ? 'text-green-400' : 'text-red-400'}>
-                        {file.verified ? '✓ Verified' : '✗ Mismatch'}
-                      </span>
-                    )}
+              <Card key={file.id} className="transfer-item">
+                <div className="transfer-header">
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="transfer-name">{file.name}</div>
+                    <div className="transfer-size">
+                      {formatSize(file.size)}
+                      {file.sha256 && (
+                        <span style={{ marginLeft: '8px', color: file.verified ? 'var(--success)' : '#EF4444' }}>
+                          {file.verified ? 'Verified' : 'Mismatch'}
+                        </span>
+                      )}
+                    </div>
                   </div>
+                  <BtnAcid small onClick={() => handleSave(file)}>
+                    <IconDownload />
+                    Save
+                  </BtnAcid>
                 </div>
-                <button
-                  onClick={() => handleSave(file)}
-                  className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded text-xs font-medium transition-colors"
-                >
-                  💾 Save
-                </button>
-              </div>
+              </Card>
             ))}
+
+            {receivedFiles.length === 0 && receivedTexts.length === 0 && (
+              <Card style={{ textAlign: 'center', padding: '48px 24px' }}>
+                <p className="text-muted">No received files or messages yet</p>
+              </Card>
+            )}
           </div>
         )}
 
-        {/* History */}
-        {history.length > 0 && (
-          <div className="space-y-2">
-            <h3 className="text-sm font-medium text-slate-300">Session history</h3>
-            <div className="max-h-48 overflow-y-auto space-y-1">
-              {history.map((item, idx) => (
-                <div key={idx} className="flex items-center justify-between p-2 bg-slate-800/30 rounded text-xs">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span>{item.direction === 'send' ? '↑' : '↓'}</span>
-                    <span className="text-slate-300 truncate">{item.name}</span>
-                  </div>
-                  <div className="flex items-center gap-2 text-slate-500">
-                    <span>{(item.size / (1024 * 1024)).toFixed(1)} MB</span>
-                    <span className={
-                      item.status === 'complete' ? 'text-green-400' :
-                      item.status === 'cancelled' ? 'text-red-400' :
-                      'text-yellow-400'
+        {/* History Tab */}
+        {activeTab === 'history' && (
+          <div className="flex flex-col gap-2">
+            {history.length === 0 ? (
+              <Card style={{ textAlign: 'center', padding: '48px 24px' }}>
+                <p className="text-muted">No transfer history yet</p>
+                <p className="text-dim" style={{ fontSize: '13px', marginTop: '8px' }}>
+                  History is kept in memory during this session
+                </p>
+              </Card>
+            ) : (
+              history.map((item, idx) => (
+                <Card key={idx} className="transfer-item" style={{ padding: '12px 16px' }}>
+                  <div className="flex items-center justify-between">
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: '14px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span style={{ color: item.direction === 'send' ? 'var(--text-muted)' : 'var(--text)' }}>
+                          {item.direction === 'send' ? 'Sent' : 'Received'}
+                        </span>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {item.name}
+                        </span>
+                        {item.verified && (
+                          <span style={{ color: 'var(--success)', fontSize: '12px' }}>Verified</span>
+                        )}
+                      </div>
+                      <div className="text-dim" style={{ fontSize: '12px', marginTop: '2px' }}>
+                        {formatSize(item.size)} · {new Date(item.timestamp).toLocaleTimeString()}
+                      </div>
+                    </div>
+                    <Badge status={
+                      item.status === 'complete' ? 'success' :
+                      item.status === 'cancelled' ? 'error' :
+                      'warning'
                     }>
                       {item.status}
-                    </span>
+                    </Badge>
                   </div>
-                </div>
-              ))}
-            </div>
+                </Card>
+              ))
+            )}
           </div>
         )}
       </div>
