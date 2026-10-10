@@ -9,6 +9,15 @@ interface QRScanProps {
   onError?: (error: string) => void;
 }
 
+interface ScannerStatus {
+  camera: 'initializing' | 'ok' | 'error';
+  resolution: string;
+  scans: number;
+  lastScan: 'none' | 'partial' | 'ok';
+  frames: string;
+  error?: string;
+}
+
 export function QRScan({ onFrame, onProgress, onError }: QRScanProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -16,10 +25,17 @@ export function QRScan({ onFrame, onProgress, onError }: QRScanProps) {
   const animFrameRef = useRef<number>(0);
   const mountedRef = useRef(false);
   const startingRef = useRef(false);
-  const [permissionDenied, setPermissionDenied] = useState(false);
-  const [scanning, setScanning] = useState(false);
   const collectedFrames = useRef<Map<number, QRFrame>>(new Map());
   const lastScanRef = useRef<string>('');
+  const scanCountRef = useRef(0);
+  const [status, setStatus] = useState<ScannerStatus>({
+    camera: 'initializing',
+    resolution: '...',
+    scans: 0,
+    lastScan: 'none',
+    frames: '0/0',
+  });
+  const [permissionDenied, setPermissionDenied] = useState(false);
 
   const stopScanner = useCallback(() => {
     console.log('[QRScan] Stopping scanner');
@@ -31,11 +47,142 @@ export function QRScan({ onFrame, onProgress, onError }: QRScanProps) {
       streamRef.current.getTracks().forEach(t => t.stop());
       streamRef.current = null;
     }
-    setScanning(false);
   }, []);
 
+  const processScan = useCallback((data: string) => {
+    if (data === lastScanRef.current) return;
+    lastScanRef.current = data;
+    scanCountRef.current++;
+
+    const frame = parseFrame(data);
+    if (frame) {
+      collectedFrames.current.set(frame.index, frame);
+      onFrame(frame);
+      onProgress?.(collectedFrames.current.size, frame.total);
+      
+      setStatus(prev => ({
+        ...prev,
+        scans: scanCountRef.current,
+        lastScan: 'ok',
+        frames: `${collectedFrames.current.size}/${frame.total}`,
+      }));
+    } else {
+      setStatus(prev => ({
+        ...prev,
+        scans: scanCountRef.current,
+        lastScan: 'partial',
+      }));
+    }
+  }, [onFrame, onProgress]);
+
+  const scanLoop = useCallback(() => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    
+    if (!mountedRef.current) {
+      console.log('[QRScan] Component unmounted, stopping scan loop');
+      return;
+    }
+    
+    if (!video || !canvas || video.readyState !== video.HAVE_ENOUGH_DATA) {
+      animFrameRef.current = requestAnimationFrame(scanLoop);
+      return;
+    }
+
+    try {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        animFrameRef.current = requestAnimationFrame(scanLoop);
+        return;
+      }
+
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+      // Try BarcodeDetector first if available
+      if ('BarcodeDetector' in window) {
+        const BarcodeDetectorClass = (window as any).BarcodeDetector;
+        BarcodeDetectorClass.getSupportedFormats().then((formats: string[]) => {
+          if (formats.includes('qr_code')) {
+            const detector = new BarcodeDetectorClass({ formats: ['qr_code'] });
+            detector.detectFromCanvas(canvas).then((barcodes: any[]) => {
+              if (barcodes.length > 0) {
+                processScan(barcodes[0].rawValue);
+              }
+              if (mountedRef.current) {
+                setTimeout(() => {
+                  animFrameRef.current = requestAnimationFrame(scanLoop);
+                }, 100); // ~10 fps
+              }
+            }).catch(() => {
+              // Fallback to jsQR
+              const code = jsQR(imageData.data, imageData.width, imageData.height, {
+                inversionAttempts: 'attemptBoth',
+              });
+              if (code) {
+                processScan(code.data);
+              }
+              if (mountedRef.current) {
+                setTimeout(() => {
+                  animFrameRef.current = requestAnimationFrame(scanLoop);
+                }, 100);
+              }
+            });
+          } else {
+            // BarcodeDetector doesn't support QR, use jsQR
+            const code = jsQR(imageData.data, imageData.width, imageData.height, {
+              inversionAttempts: 'attemptBoth',
+            });
+            if (code) {
+              processScan(code.data);
+            }
+            if (mountedRef.current) {
+              setTimeout(() => {
+                animFrameRef.current = requestAnimationFrame(scanLoop);
+              }, 100);
+            }
+          }
+        }).catch(() => {
+          // Fallback to jsQR
+          const code = jsQR(imageData.data, imageData.width, imageData.height, {
+            inversionAttempts: 'attemptBoth',
+          });
+          if (code) {
+            processScan(code.data);
+          }
+          if (mountedRef.current) {
+            setTimeout(() => {
+              animFrameRef.current = requestAnimationFrame(scanLoop);
+            }, 100);
+          }
+        });
+      } else {
+        // Use jsQR
+        const code = jsQR(imageData.data, imageData.width, imageData.height, {
+          inversionAttempts: 'attemptBoth',
+        });
+        if (code) {
+          processScan(code.data);
+        }
+        if (mountedRef.current) {
+          setTimeout(() => {
+            animFrameRef.current = requestAnimationFrame(scanLoop);
+          }, 100); // ~10 fps
+        }
+      }
+    } catch (err) {
+      console.error('[QRScan] Error in scan loop:', err);
+      if (mountedRef.current) {
+        setTimeout(() => {
+          animFrameRef.current = requestAnimationFrame(scanLoop);
+        }, 100);
+      }
+    }
+  }, [processScan]);
+
   const startScanner = useCallback(async () => {
-    // Guard against double-start (StrictMode, rapid re-renders)
     if (startingRef.current || streamRef.current) {
       console.log('[QRScan] Already starting or started, skipping');
       return;
@@ -48,10 +195,13 @@ export function QRScan({ onFrame, onProgress, onError }: QRScanProps) {
       setPermissionDenied(false);
       
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } },
+        video: { 
+          facingMode: 'environment',
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
       });
       
-      // Check if component is still mounted
       if (!mountedRef.current) {
         console.log('[QRScan] Component unmounted during getUserMedia, stopping stream');
         stream.getTracks().forEach(t => t.stop());
@@ -63,11 +213,43 @@ export function QRScan({ onFrame, onProgress, onError }: QRScanProps) {
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        videoRef.current.setAttribute('playsinline', 'true');
+        videoRef.current.setAttribute('muted', 'true');
+        videoRef.current.setAttribute('autoplay', 'true');
+        
         await videoRef.current.play();
-        setScanning(true);
-        startingRef.current = false;
-        console.log('[QRScan] Scanner started successfully');
-        scanLoop();
+        
+        // Wait for metadata to load
+        await new Promise<void>((resolve) => {
+          if (videoRef.current && videoRef.current.videoWidth > 0) {
+            resolve();
+          } else if (videoRef.current) {
+            videoRef.current.onloadedmetadata = () => resolve();
+          } else {
+            resolve();
+          }
+        });
+        
+        if (videoRef.current && videoRef.current.videoWidth > 0) {
+          setStatus(prev => ({
+            ...prev,
+            camera: 'ok',
+            resolution: `${videoRef.current!.videoWidth}x${videoRef.current!.videoHeight}`,
+          }));
+          startingRef.current = false;
+          console.log('[QRScan] Scanner started successfully');
+          scanLoop();
+        } else {
+          console.log('[QRScan] Video metadata not available');
+          stream.getTracks().forEach(t => t.stop());
+          streamRef.current = null;
+          startingRef.current = false;
+          setStatus(prev => ({
+            ...prev,
+            camera: 'error',
+            error: 'Video metadata not available',
+          }));
+        }
       } else {
         console.log('[QRScan] Video ref not available, stopping stream');
         stream.getTracks().forEach(t => t.stop());
@@ -80,79 +262,22 @@ export function QRScan({ onFrame, onProgress, onError }: QRScanProps) {
       
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
         setPermissionDenied(true);
+        setStatus(prev => ({
+          ...prev,
+          camera: 'error',
+          error: 'Camera permission denied',
+        }));
         onError?.('Camera permission denied. Please use the "Paste code" option below.');
       } else {
+        setStatus(prev => ({
+          ...prev,
+          camera: 'error',
+          error: err.message,
+        }));
         onError?.(`Camera error: ${err.message}`);
       }
     }
-  }, [onError]);
-
-  const scanLoop = useCallback(() => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    
-    // Check if component is still mounted
-    if (!mountedRef.current) {
-      console.log('[QRScan] Component unmounted, stopping scan loop');
-      return;
-    }
-    
-    if (!video || !canvas || video.readyState !== video.HAVE_ENOUGH_DATA) {
-      animFrameRef.current = requestAnimationFrame(scanLoop);
-      return;
-    }
-
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-    // Try BarcodeDetector first
-    if ('BarcodeDetector' in window) {
-      const detector = new (window as any).BarcodeDetector({ formats: ['qr_code'] });
-      detector.detectFromCanvas(canvas).then((barcodes: any[]) => {
-        if (barcodes.length > 0) {
-          processScan(barcodes[0].rawValue);
-        }
-        if (mountedRef.current) {
-          animFrameRef.current = requestAnimationFrame(scanLoop);
-        }
-      }).catch(() => {
-        // Fallback to jsQR
-        const code = jsQR(imageData.data, imageData.width, imageData.height);
-        if (code) {
-          processScan(code.data);
-        }
-        if (mountedRef.current) {
-          animFrameRef.current = requestAnimationFrame(scanLoop);
-        }
-      });
-    } else {
-      // Use jsQR
-      const code = jsQR(imageData.data, imageData.width, imageData.height);
-      if (code) {
-        processScan(code.data);
-      }
-      if (mountedRef.current) {
-        animFrameRef.current = requestAnimationFrame(scanLoop);
-      }
-    }
-  }, []);
-
-  const processScan = (data: string) => {
-    if (data === lastScanRef.current) return;
-    lastScanRef.current = data;
-
-    const frame = parseFrame(data);
-    if (frame) {
-      collectedFrames.current.set(frame.index, frame);
-      onFrame(frame);
-      onProgress?.(collectedFrames.current.size, frame.total);
-    }
-  };
+  }, [onError, scanLoop]);
 
   useEffect(() => {
     console.log('[QRScan] Component mounted');
@@ -181,17 +306,29 @@ export function QRScan({ onFrame, onProgress, onError }: QRScanProps) {
               className="w-full h-full object-cover"
               playsInline
               muted
+              autoPlay
             />
             <canvas ref={canvasRef} className="hidden" />
-            {scanning && (
-              <div className="absolute inset-0 flex items-center justify-center">
+            {status.camera === 'ok' && (
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                 <div className="w-48 h-48 border-2 border-indigo-400/50 rounded-lg animate-pulse" />
               </div>
             )}
           </div>
-          <p className="text-xs text-slate-400">
-            Point camera at the QR code on the other device
-          </p>
+          
+          {/* Status line */}
+          <div className="text-xs text-slate-400 text-center font-mono">
+            Camera: {status.camera === 'ok' ? 'OK' : status.camera} {status.resolution} | 
+            scans: {status.scans} | 
+            last: {status.lastScan} | 
+            frames: {status.frames}
+          </div>
+          
+          {status.error && (
+            <div className="text-xs text-red-400 text-center">
+              Error: {status.error}
+            </div>
+          )}
         </>
       )}
     </div>

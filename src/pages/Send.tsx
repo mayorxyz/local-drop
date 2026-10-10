@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { PeerConnection, ConnectionState } from '../lib/peer';
-import { createOfferPayload, createAnswerPayload, decodePayload, parseFrame, reassembleFrames, QRFrame, logICEGathering, logSDPDetails } from '../lib/signaling';
+import { createOfferPayload, decodePayload, rebuildSDP, parseFrame, reassembleFrames, QRFrame, logICEGathering, logSDPDetails } from '../lib/signaling';
 import { getDeviceName } from '../lib/storage';
 import { QRShow } from '../components/QRShow';
 import { QRScan } from '../components/QRScan';
@@ -88,10 +88,12 @@ export function Send({ onConnected, onBack }: SendProps) {
       const encoded = reassembleFrames(Array.from(collectedFrames.current.values()));
       if (encoded) {
         try {
-          const payload = decodePayload(encoded);
-          if (payload.t === 'answer' && peerRef.current) {
-            console.log('[Send] Decoded answer, setting remote description');
-            peerRef.current.setRemoteAnswer(payload.sdp).then(() => {
+          const descriptor = decodePayload(encoded);
+          if (descriptor.t === 'a' && peerRef.current) {
+            console.log('[Send] Decoded answer descriptor, rebuilding SDP');
+            const sdp = rebuildSDP(descriptor);
+            console.log('[Send] Setting remote description');
+            peerRef.current.setRemoteAnswer(sdp).then(() => {
               const checkConnection = setInterval(() => {
                 const ch = peerRef.current?.getDataChannel();
                 if (ch && ch.readyState === 'open') {
@@ -140,9 +142,10 @@ export function Send({ onConnected, onBack }: SendProps) {
 
   const handlePasteCode = useCallback((code: string) => {
     try {
-      const payload = decodePayload(code);
-      if (payload.t === 'answer' && peerRef.current) {
-        peerRef.current.setRemoteAnswer(payload.sdp).then(() => {
+      const descriptor = decodePayload(code);
+      if (descriptor.t === 'a' && peerRef.current) {
+        const sdp = rebuildSDP(descriptor);
+        peerRef.current.setRemoteAnswer(sdp).then(() => {
           const checkConnection = setInterval(() => {
             const ch = peerRef.current?.getDataChannel();
             if (ch && ch.readyState === 'open') {

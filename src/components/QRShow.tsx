@@ -23,10 +23,10 @@ export function QRShow({ payload }: QRShowProps) {
       if (canvasRef.current && frames.length === 1) {
         try {
           QRCode.toCanvas(canvasRef.current, frameToString(frames[0]), {
-            width: 280,
-            margin: 1,
+            width: 300,
+            margin: 4,
             errorCorrectionLevel: 'L',
-            color: { dark: '#111111', light: '#FFFFFF' },
+            color: { dark: '#000000', light: '#FFFFFF' },
           });
         } catch (err) {
           console.error('[QRShow] Error rendering QR:', err);
@@ -35,15 +35,16 @@ export function QRShow({ payload }: QRShowProps) {
       return;
     }
 
+    // Multi-frame cycling (only as fallback when > 500 chars)
     let idx = 0;
     const renderFrame = () => {
       if (canvasRef.current && frames[idx]) {
         try {
           QRCode.toCanvas(canvasRef.current, frameToString(frames[idx]), {
-            width: 280,
-            margin: 1,
+            width: 300,
+            margin: 4,
             errorCorrectionLevel: 'L',
-            color: { dark: '#111111', light: '#FFFFFF' },
+            color: { dark: '#000000', light: '#FFFFFF' },
           });
           setCurrentFrame(idx);
         } catch (err) {
@@ -54,7 +55,7 @@ export function QRShow({ payload }: QRShowProps) {
     };
 
     renderFrame();
-    intervalRef.current = setInterval(renderFrame, 500);
+    intervalRef.current = setInterval(renderFrame, 333); // 3 fps
 
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
@@ -65,7 +66,14 @@ export function QRShow({ payload }: QRShowProps) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
-      <canvas ref={canvasRef} />
+      <div style={{ 
+        background: '#FFFFFF', 
+        padding: '16px', 
+        borderRadius: '12px',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+      }}>
+        <canvas ref={canvasRef} />
+      </div>
       {frames.length > 1 && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: 'var(--text-muted)' }}>
           <span>Frame {currentFrame + 1} / {frames.length}</span>

@@ -1,7 +1,7 @@
 /**
- * Signaling module: SDP minification, encoding/decoding, QR framing
+ * Signaling module: Compact SDP descriptor format
+ * Instead of sending full SDP, we send only essential ICE info and rebuild SDP on the other side.
  */
-import { deflate, inflate } from 'pako';
 
 // Base64url encode/decode
 function base64urlEncode(data: Uint8Array): string {
@@ -18,6 +18,20 @@ function base64urlDecode(str: string): Uint8Array {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
+}
+
+/**
+ * Compact SDP descriptor format
+ * Contains only essential ICE information needed to establish connection
+ */
+export interface CompactSDP {
+  v: 1; // version
+  t: 'o' | 'a'; // type: offer or answer
+  u: string; // ice-ufrag
+  p: string; // ice-pwd
+  f: string; // fingerprint (hex string without colons)
+  s: string; // setup role: 'active', 'passive', or 'actpass'
+  c: Array<[string, number]>; // candidates: [[ip, port], ...] max 3
 }
 
 /**
@@ -47,116 +61,151 @@ export function logSDPDetails(sdp: string, label: string) {
 }
 
 /**
- * Minify SDP: keep only essential lines for host-only ICE
+ * Parse SDP and extract compact descriptor
  */
-export function minifySDP(sdp: string): string {
-  const lines = sdp.split('\r\n').filter(l => l.length > 0);
-  const result: string[] = [];
-  const candidates: string[] = [];
-  let inMedia = false;
-  let mediaType = '';
-
+export function parseSDP(sdp: string, type: 'o' | 'a'): CompactSDP {
+  const lines = sdp.split('\r\n');
+  
+  let iceUfrag = '';
+  let icePwd = '';
+  let fingerprint = '';
+  let setup = '';
+  const candidates: Array<[string, number]> = [];
+  
   for (const line of lines) {
-    const type = line.substring(0, 1);
-    const value = line.substring(2);
-
-    // Always keep session-level basics
-    if (!inMedia) {
-      if (type === 'v' || type === 'o' || type === 's' || type === 't') {
-        result.push(line);
-      }
-      if (type === 'm') {
-        inMedia = true;
-        mediaType = value.split(' ')[0];
-        // Only keep application (datachannel) media
-        if (mediaType === 'application') {
-          result.push(line);
-        }
-      }
-      continue;
-    }
-
-    // In media section
-    if (type === 'm') {
-      // New media section
-      mediaType = value.split(' ')[0];
-      if (mediaType === 'application') {
-        result.push(line);
-      }
-      continue;
-    }
-
-    if (mediaType !== 'application') continue;
-
-    // Keep essential attributes
-    if (type === 'c') {
-      result.push(line);
-    } else if (type === 'a') {
-      if (
-        value.startsWith('ice-ufrag:') ||
-        value.startsWith('ice-pwd:') ||
-        value.startsWith('fingerprint:') ||
-        value.startsWith('setup:') ||
-        value.startsWith('mid:') ||
-        value.startsWith('sctp-port:') ||
-        value.startsWith('max-message-size:') ||
-        value === 'sendrecv' ||
-        value === 'sendonly' ||
-        value === 'recvonly'
-      ) {
-        result.push(line);
-      } else if (value.startsWith('candidate:')) {
-        // Keep all host candidates (IPv4, mDNS .local)
-        // Drop only IPv6 link-local (fe80::) and duplicates
-        if (value.includes(' typ host')) {
-          // Check if it's IPv6 link-local
-          const isIPv6LinkLocal = value.includes(' fe80:') || value.includes(' fe80::');
-          if (!isIPv6LinkLocal) {
-            candidates.push(line);
-          }
+    if (line.startsWith('a=ice-ufrag:')) {
+      iceUfrag = line.substring('a=ice-ufrag:'.length);
+    } else if (line.startsWith('a=ice-pwd:')) {
+      icePwd = line.substring('a=ice-pwd:'.length);
+    } else if (line.startsWith('a=fingerprint:sha-256 ')) {
+      // Extract fingerprint and remove colons
+      const fp = line.substring('a=fingerprint:sha-256 '.length);
+      fingerprint = fp.replace(/:/g, '');
+    } else if (line.startsWith('a=setup:')) {
+      setup = line.substring('a=setup:'.length);
+    } else if (line.startsWith('a=candidate:')) {
+      // Parse candidate: a=candidate:foundation component protocol priority address port typ type ...
+      const parts = line.substring('a=candidate:'.length).split(' ');
+      if (parts.length >= 5) {
+        const address = parts[4];
+        const port = parseInt(parts[5], 10);
+        
+        // Only keep host candidates, skip IPv6 link-local
+        if (parts.includes('host') && !address.startsWith('fe80:')) {
+          candidates.push([address, port]);
+          if (candidates.length >= 3) break; // Max 3 candidates
         }
       }
     }
   }
-
-  // Deduplicate candidates
-  const uniqueCandidates = [...new Set(candidates)];
-  result.push(...uniqueCandidates);
-
-  const minified = result.join('\r\n') + '\r\n';
   
-  // Debug logging
-  console.log('[SDP Minify] Original length:', sdp.length, 'chars');
-  console.log('[SDP Minify] Minified length:', minified.length, 'chars');
-  console.log('[SDP Minify] Candidates found:', candidates.length);
-  console.log('[SDP Minify] Unique candidates:', uniqueCandidates.length);
+  const descriptor: CompactSDP = {
+    v: 1,
+    t: type,
+    u: iceUfrag,
+    p: icePwd,
+    f: fingerprint,
+    s: setup,
+    c: candidates,
+  };
   
-  return minified;
+  console.log('[ParseSDP] Extracted descriptor:', {
+    type,
+    iceUfrag: iceUfrag.substring(0, 8) + '...',
+    icePwd: icePwd.substring(0, 8) + '...',
+    fingerprint: fingerprint.substring(0, 16) + '...',
+    setup,
+    candidateCount: candidates.length,
+  });
+  
+  return descriptor;
 }
 
 /**
- * Encode payload: JSON -> deflate -> base64url
+ * Rebuild full SDP from compact descriptor
  */
-export function encodePayload(data: object): string {
-  const json = JSON.stringify(data);
-  const compressed = deflate(new TextEncoder().encode(json));
-  const encoded = base64urlEncode(compressed);
+export function rebuildSDP(descriptor: CompactSDP): string {
+  const lines: string[] = [
+    'v=0',
+    'o=- ' + Math.floor(Math.random() * 1e9) + ' 2 IN IP4 127.0.0.1',
+    's=-',
+    't=0 0',
+    'a=group:BUNDLE 0',
+    'm=application 9 UDP/DTLS/SCTP webrtc-datachannel',
+    'c=IN IP4 0.0.0.0',
+    'a=ice-ufrag:' + descriptor.u,
+    'a=ice-pwd:' + descriptor.p,
+    'a=fingerprint:sha-256 ' + descriptor.f.match(/.{1,2}/g)!.join(':'),
+    'a=setup:' + descriptor.s,
+    'a=mid:0',
+    'a=sctp-port:5000',
+    'a=max-message-size:262144',
+  ];
+  
+  // Add candidates
+  for (let i = 0; i < descriptor.c.length; i++) {
+    const [ip, port] = descriptor.c[i];
+    // Foundation, component (1=RTP), protocol (udp), priority, address, port, typ, type
+    lines.push(`a=candidate:${i + 1} 1 udp 2122260223 ${ip} ${port} typ host generation 0`);
+  }
+  
+  const sdp = lines.join('\r\n') + '\r\n';
+  
+  console.log('[RebuildSDP] Rebuilt SDP length:', sdp.length, 'chars');
+  console.log('[RebuildSDP] Candidate count:', descriptor.c.length);
+  
+  return sdp;
+}
+
+/**
+ * Encode compact descriptor to base64url
+ */
+export function encodePayload(descriptor: CompactSDP): string {
+  const json = JSON.stringify(descriptor);
+  const encoded = base64urlEncode(new TextEncoder().encode(json));
   
   console.log('[Encode] JSON length:', json.length, 'chars');
-  console.log('[Encode] Compressed length:', compressed.length, 'bytes');
   console.log('[Encode] Encoded length:', encoded.length, 'chars');
   
   return encoded;
 }
 
 /**
- * Decode payload: base64url -> inflate -> JSON
+ * Decode base64url to compact descriptor
  */
-export function decodePayload(encoded: string): any {
-  const compressed = base64urlDecode(encoded);
-  const decompressed = inflate(compressed);
-  const json = new TextDecoder().decode(decompressed);
-  return JSON.parse(json);
+export function decodePayload(encoded: string): CompactSDP {
+  const bytes = base64urlDecode(encoded);
+  const json = new TextDecoder().decode(bytes);
+  const descriptor = JSON.parse(json) as CompactSDP;
+  
+  console.log('[Decode] Decoded descriptor:', {
+    type: descriptor.t,
+    candidateCount: descriptor.c.length,
+  });
+  
+  return descriptor;
+}
+
+/**
+ * Create offer payload from SDP
+ */
+export function createOfferPayload(sdp: string): string {
+  console.log('[CreateOffer] Parsing SDP to compact descriptor');
+  const descriptor = parseSDP(sdp, 'o');
+  const encoded = encodePayload(descriptor);
+  console.log('[CreateOffer] Final encoded length:', encoded.length, 'chars');
+  return encoded;
+}
+
+/**
+ * Create answer payload from SDP
+ */
+export function createAnswerPayload(sdp: string): string {
+  console.log('[CreateAnswer] Parsing SDP to compact descriptor');
+  const descriptor = parseSDP(sdp, 'a');
+  const encoded = encodePayload(descriptor);
+  console.log('[CreateAnswer] Final encoded length:', encoded.length, 'chars');
+  return encoded;
 }
 
 /**
@@ -169,7 +218,7 @@ export interface QRFrame {
   data: string;
 }
 
-const MAX_QR_CHARS = 900;
+const MAX_QR_CHARS = 500; // Reduced to ensure single QR in most cases
 const FRAME_HEADER = 'LD'; // prefix
 
 export function createFrames(encoded: string): QRFrame[] {
@@ -233,20 +282,4 @@ export function reassembleFrames(frames: QRFrame[]): string | null {
   }
 
   return sorted.map(f => f.data).join('');
-}
-
-/**
- * Create offer payload
- */
-export function createOfferPayload(sdp: string): string {
-  const minified = minifySDP(sdp);
-  return encodePayload({ t: 'offer', sdp: minified });
-}
-
-/**
- * Create answer payload
- */
-export function createAnswerPayload(sdp: string): string {
-  const minified = minifySDP(sdp);
-  return encodePayload({ t: 'answer', sdp: minified });
 }

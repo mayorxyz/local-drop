@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { PeerConnection, ConnectionState } from '../lib/peer';
-import { createAnswerPayload, decodePayload, parseFrame, reassembleFrames, QRFrame, logICEGathering, logSDPDetails } from '../lib/signaling';
+import { createAnswerPayload, decodePayload, rebuildSDP, parseFrame, reassembleFrames, QRFrame, logICEGathering, logSDPDetails } from '../lib/signaling';
 import { getDeviceName } from '../lib/storage';
 import { QRShow } from '../components/QRShow';
 import { QRScan } from '../components/QRScan';
@@ -32,10 +32,11 @@ export function Receive({ onConnected, onBack }: ReceiveProps) {
       const encoded = reassembleFrames(Array.from(collectedFrames.current.values()));
       if (encoded) {
         try {
-          const payload = decodePayload(encoded);
-          if (payload.t === 'offer') {
-            console.log('[Receive] Decoded offer, creating answer');
-            startAnswer(payload.sdp);
+          const descriptor = decodePayload(encoded);
+          if (descriptor.t === 'o') {
+            console.log('[Receive] Decoded offer descriptor, rebuilding SDP');
+            const sdp = rebuildSDP(descriptor);
+            startAnswer(sdp);
           }
         } catch (err: any) {
           setError(`Failed to decode offer: ${err.message}`);
@@ -133,9 +134,10 @@ export function Receive({ onConnected, onBack }: ReceiveProps) {
 
   const handlePasteCode = useCallback((code: string) => {
     try {
-      const payload = decodePayload(code);
-      if (payload.t === 'offer') {
-        startAnswer(payload.sdp);
+      const descriptor = decodePayload(code);
+      if (descriptor.t === 'o') {
+        const sdp = rebuildSDP(descriptor);
+        startAnswer(sdp);
       }
     } catch (err: any) {
       setError(`Invalid code: ${err.message}`);
