@@ -3,30 +3,52 @@ import { Home } from './pages/Home';
 import { Send } from './pages/Send';
 import { Receive } from './pages/Receive';
 import { Connected } from './pages/Connected';
+import { getThemePreference, setThemePreference, requestPersistentStorage } from './lib/storage';
 
 type Page = 'home' | 'send' | 'receive' | 'connected';
+type Theme = 'dark' | 'light' | 'system';
 
 export default function App() {
   const [page, setPage] = useState<Page>('home');
   const [channel, setChannel] = useState<RTCDataChannel | null>(null);
   const [role, setRole] = useState<'sender' | 'receiver'>('sender');
+  const [theme, setTheme] = useState<Theme>(getThemePreference());
   const [isDark, setIsDark] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
 
   // Request persistent storage on first run
   useEffect(() => {
-    if (navigator.storage && navigator.storage.persist) {
-      navigator.storage.persist().then((persisted) => {
-        console.log('Persistent storage:', persisted);
-      });
-    }
+    requestPersistentStorage();
   }, []);
 
-  // Apply theme
+  // Handle theme with prefers-color-scheme
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    
+    const updateTheme = () => {
+      if (theme === 'system') {
+        setIsDark(mediaQuery.matches);
+      } else {
+        setIsDark(theme === 'dark');
+      }
+    };
+
+    updateTheme();
+    mediaQuery.addEventListener('change', updateTheme);
+    return () => mediaQuery.removeEventListener('change', updateTheme);
+  }, [theme]);
+
+  // Apply theme class to document
   useEffect(() => {
     document.documentElement.classList.toggle('dark', isDark);
     document.documentElement.classList.toggle('light', !isDark);
   }, [isDark]);
+
+  const handleThemeToggle = () => {
+    const newTheme: Theme = theme === 'dark' ? 'light' : theme === 'light' ? 'system' : 'dark';
+    setTheme(newTheme);
+    setThemePreference(newTheme);
+  };
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -56,15 +78,21 @@ export default function App() {
     showToast('Disconnected');
   }, [channel, showToast]);
 
+  const getThemeIcon = () => {
+    if (theme === 'dark') return '🌙';
+    if (theme === 'light') return '☀️';
+    return '🌓';
+  };
+
   return (
     <div className={`min-h-[100dvh] ${isDark ? 'bg-slate-900 text-slate-100' : 'bg-white text-slate-900'}`}>
       {/* Theme toggle - top right corner */}
       <button
-        onClick={() => setIsDark(!isDark)}
-        className="fixed top-4 right-4 z-40 w-8 h-8 flex items-center justify-center rounded-full bg-slate-800/50 hover:bg-slate-700/50 text-sm transition-colors"
-        title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+        onClick={handleThemeToggle}
+        className="fixed top-4 right-4 z-40 w-9 h-9 flex items-center justify-center rounded-full bg-slate-800/50 hover:bg-slate-700/50 text-sm transition-colors backdrop-blur-sm"
+        title={`Theme: ${theme} (click to change)`}
       >
-        {isDark ? '☀️' : '🌙'}
+        {getThemeIcon()}
       </button>
 
       {/* Pages */}
