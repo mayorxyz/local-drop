@@ -1,1 +1,86 @@
 @import "tailwindcss";
+
+:root {
+  --color-bg: #0f172a;
+  --color-text: #f8fafc;
+  --color-surface: #1e293b;
+  --color-border: #334155;
+}
+
+html.light {
+  --color-bg: #f8fafc;
+  --color-text: #0f172a;
+  --color-surface: #ffffff;
+  --color-border: #e2e8f0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  min-height: 100dvh;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+#root {
+  width: 100%;
+  min-height: 100dvh;
+}
+
+/* Light mode overrides for Tailwind classes */
+html.light .bg-slate-900 { background-color: #f8fafc !important; }
+html.light .bg-slate-800 { background-color: #ffffff !important; }
+html.light .bg-slate-800\/50 { background-color: rgba(255,255,255,0.8) !important; }
+html.light .bg-slate-800\/30 { background-color: rgba(255,255,255,0.5) !important; }
+html.light .bg-slate-700 { background-color: #f1f5f9 !important; }
+html.light .bg-slate-700\/50 { background-color: rgba(241,245,249,0.5) !important; }
+html.light .border-slate-700 { border-color: #e2e8f0 !important; }
+html.light .border-slate-600 { border-color: #cbd5e1 !important; }
+html.light .text-slate-100 { color: #0f172a !important; }
+html.light .text-slate-200 { color: #1e293b !important; }
+html.light .text-slate-300 { color: #334155 !important; }
+html.light .text-slate-400 { color: #64748b !important; }
+html.light .text-slate-500 { color: #94a3b8 !important; }
+
+/* Animations */
+@keyframes fade-in {
+  from { opacity: 0; transform: translate(-50%, 10px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #475569;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* Safe area for mobile */
+@supports (padding: env(safe-area-inset-bottom)) {
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
