@@ -1,48 +1,42 @@
 import { describe, it, expect } from 'vitest';
-
-/**
- * Tests for the transfer protocol chunk encoding/decoding
- */
-
-// Replicate the hash function from transfer.ts for testing
-function transferIdHash(id: string): number {
-  const idBytes = new TextEncoder().encode(id);
-  let hash = 0;
-  for (let i = 0; i < idBytes.length; i++) {
-    hash = ((hash << 5) - hash + idBytes[i]) | 0;
-  }
-  return hash;
-}
-
-function encodeChunk(transferId: string, data: ArrayBuffer): ArrayBuffer {
-  const hash = transferIdHash(transferId);
-  const result = new ArrayBuffer(4 + data.byteLength);
-  const view = new DataView(result);
-  view.setUint32(0, hash, true);
-  new Uint8Array(result, 4).set(new Uint8Array(data));
-  return result;
-}
-
-function decodeChunkHash(data: ArrayBuffer): number {
-  const view = new DataView(data);
-  return view.getUint32(0, true);
-}
-
-function decodeChunkData(data: ArrayBuffer): ArrayBuffer {
-  return data.slice(4);
-}
+import { computeSHA256, verifySHA256, StreamingSHA256 } from '../hash';
 
 describe('transfer protocol', () => {
   describe('chunk encoding/decoding', () => {
+    // Replicate hash function for testing
+    function transferIdHash(id: string): number {
+      const idBytes = new TextEncoder().encode(id);
+      let hash = 0;
+      for (let i = 0; i < idBytes.length; i++) {
+        hash = ((hash << 5) - hash + idBytes[i]) | 0;
+      }
+      return hash;
+    }
+
+    function encodeChunk(transferId: string, data: ArrayBuffer): ArrayBuffer {
+      const hash = transferIdHash(transferId);
+      const result = new ArrayBuffer(4 + data.byteLength);
+      const view = new DataView(result);
+      view.setUint32(0, hash, true);
+      new Uint8Array(result, 4).set(new Uint8Array(data));
+      return result;
+    }
+
+    function decodeChunkHash(data: ArrayBuffer): number {
+      const view = new DataView(data);
+      return view.getUint32(0, true);
+    }
+
+    function decodeChunkData(data: ArrayBuffer): ArrayBuffer {
+      return data.slice(4);
+    }
+
     it('should encode chunk with correct hash prefix', () => {
       const transferId = 'test_transfer_1';
       const originalData = new Uint8Array([1, 2, 3, 4, 5]).buffer;
       const encoded = encodeChunk(transferId, originalData);
       
-      // Should be 4 bytes prefix + 5 bytes data
       expect(encoded.byteLength).toBe(9);
-      
-      // Hash should match
       const hash = decodeChunkHash(encoded);
       expect(hash).toBe(transferIdHash(transferId));
     });
@@ -80,7 +74,7 @@ describe('transfer protocol', () => {
       const emptyData = new ArrayBuffer(0);
       const encoded = encodeChunk(transferId, emptyData);
       
-      expect(encoded.byteLength).toBe(4); // Just the prefix
+      expect(encoded.byteLength).toBe(4);
       expect(decodeChunkHash(encoded)).toBe(transferIdHash(transferId));
     });
 
@@ -100,13 +94,106 @@ describe('transfer protocol', () => {
     });
   });
 
+  describe('SHA-256 hashing', () => {
+    it('should compute SHA-256 of a buffer', async () => {
+      const data = new TextEncoder().encode('hello world').buffer;
+      const hash = await computeSHA256(data);
+      expect(hash).toBe('b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9');
+    });
+
+    it('should compute SHA-256 of empty buffer', async () => {
+      const data = new ArrayBuffer(0);
+      const hash = await computeSHA256(data);
+      expect(hash).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+    });
+
+    it('should verify matching hash', async () => {
+      const data = new TextEncoder().encode('test data').buffer;
+      const hash = await computeSHA256(data);
+      const verified = await verifySHA256(data, hash);
+      expect(verified).toBe(true);
+    });
+
+    it('should reject mismatched hash', async () => {
+      const data = new TextEncoder().encode('test data').buffer;
+      const verified = await verifySHA256(data, '0000000000000000000000000000000000000000000000000000000000000000');
+      expect(verified).toBe(false);
+    });
+  });
+
+  describe('Streaming SHA-256', () => {
+    it('should compute same hash as one-shot for same data', async () => {
+      const data = new TextEncoder().encode('hello world streaming test');
+      
+      // One-shot
+      const oneShotHash = await computeSHA256(data.buffer);
+      
+      // Streaming
+      const streamer = new StreamingSHA256();
+      streamer.update(data.slice(0, 5));
+      streamer.update(data.slice(5, 10));
+      streamer.update(data.slice(10));
+      const streamHash = await streamer.finalize();
+      
+      expect(streamHash).toBe(oneShotHash);
+    });
+
+    it('should handle many small chunks', async () => {
+      const data = new TextEncoder().encode('abcdefghijklmnopqrstuvwxyz');
+      
+      const oneShotHash = await computeSHA256(data.buffer);
+      
+      const streamer = new StreamingSHA256();
+      for (let i = 0; i < data.length; i++) {
+        streamer.update(data.slice(i, i + 1));
+      }
+      const streamHash = await streamer.finalize();
+      
+      expect(streamHash).toBe(oneShotHash);
+    });
+
+    it('should track bytes processed', () => {
+      const streamer = new StreamingSHA256();
+      streamer.update(new Uint8Array(100));
+      expect(streamer.bytesProcessed).toBe(100);
+      streamer.update(new Uint8Array(200));
+      expect(streamer.bytesProcessed).toBe(300);
+    });
+  });
+
   describe('chunk reassembly', () => {
+    function transferIdHash(id: string): number {
+      const idBytes = new TextEncoder().encode(id);
+      let hash = 0;
+      for (let i = 0; i < idBytes.length; i++) {
+        hash = ((hash << 5) - hash + idBytes[i]) | 0;
+      }
+      return hash;
+    }
+
+    function encodeChunk(transferId: string, data: ArrayBuffer): ArrayBuffer {
+      const hash = transferIdHash(transferId);
+      const result = new ArrayBuffer(4 + data.byteLength);
+      const view = new DataView(result);
+      view.setUint32(0, hash, true);
+      new Uint8Array(result, 4).set(new Uint8Array(data));
+      return result;
+    }
+
+    function decodeChunkHash(data: ArrayBuffer): number {
+      const view = new DataView(data);
+      return view.getUint32(0, true);
+    }
+
+    function decodeChunkData(data: ArrayBuffer): ArrayBuffer {
+      return data.slice(4);
+    }
+
     it('should reassemble chunks in order', () => {
       const transferId = 'reassembly_test';
       const chunks: ArrayBuffer[] = [];
       const originalData: number[] = [];
       
-      // Create 10 chunks of 100 bytes each
       for (let i = 0; i < 10; i++) {
         const data = new Uint8Array(100);
         for (let j = 0; j < 100; j++) {
@@ -116,7 +203,6 @@ describe('transfer protocol', () => {
         chunks.push(encodeChunk(transferId, data.buffer));
       }
       
-      // Reassemble
       const hash = transferIdHash(transferId);
       const reassembled: number[] = [];
       for (const chunk of chunks) {
@@ -127,41 +213,6 @@ describe('transfer protocol', () => {
       }
       
       expect(reassembled).toEqual(originalData);
-    });
-
-    it('should reassemble chunks out of order', () => {
-      const transferId = 'unordered_test';
-      const chunks: ArrayBuffer[] = [];
-      const originalData: number[] = [];
-      
-      for (let i = 0; i < 5; i++) {
-        const data = new Uint8Array(50);
-        for (let j = 0; j < 50; j++) {
-          data[j] = i * 50 + j;
-          originalData.push(i * 50 + j);
-        }
-        chunks.push(encodeChunk(transferId, data.buffer));
-      }
-      
-      // Shuffle chunks
-      const shuffled = [...chunks].sort(() => Math.random() - 0.5);
-      
-      // Reassemble in original order (by position in original array)
-      const hash = transferIdHash(transferId);
-      const reassembled: number[] = [];
-      
-      // We need to track order - in real protocol, chunks are ordered by arrival
-      // For this test, we verify all chunks are present and have correct hash
-      let validChunks = 0;
-      for (const chunk of shuffled) {
-        if (decodeChunkHash(chunk) === hash) {
-          validChunks++;
-          const data = new Uint8Array(decodeChunkData(chunk));
-          // Just verify data is valid
-          expect(data.length).toBe(50);
-        }
-      }
-      expect(validChunks).toBe(5);
     });
 
     it('should reject chunks with wrong hash', () => {

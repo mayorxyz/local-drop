@@ -38,7 +38,6 @@ describe('signaling', () => {
     it('should produce base64url-safe output', () => {
       const data = { t: 'offer', sdp: 'test data with various content' };
       const encoded = encodePayload(data);
-      // base64url should not contain +, /, or =
       expect(encoded).not.toMatch(/[+/=]/);
     });
   });
@@ -83,7 +82,6 @@ describe('signaling', () => {
     it('should reassemble frames out of order', () => {
       const data = 'x'.repeat(2000);
       const frames = createFrames(data);
-      // Shuffle frames
       const shuffled = [...frames].sort(() => Math.random() - 0.5);
       const reassembled = reassembleFrames(shuffled);
       expect(reassembled).toBe(data);

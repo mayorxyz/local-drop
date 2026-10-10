@@ -1,20 +1,109 @@
 /**
  * Zip module: folder compression using fflate
- * Will be fully implemented in Stage 3
+ * Supports streaming zip creation from multiple files
  */
 
-import { Zip } from 'fflate';
+import { Zip, ZipDeflate, ZipPassThrough } from 'fflate';
 
 /**
- * Create a streaming zip from multiple files
- * For now, a placeholder that will be replaced with full implementation
+ * Create a zip Blob from File objects
+ * Uses fflate's streaming API for memory efficiency
  */
-export async function createZipStream(
-  files: Array<{ name: string; stream: () => ReadableStream<Uint8Array>; size: number }>,
+export async function createZipFromFiles(
+  files: File[],
   onProgress?: (bytesWritten: number) => void
-): Promise<ReadableStream<Uint8Array>> {
-  // Placeholder - will be fully implemented in Stage 3
-  throw new Error('Zip streaming not yet implemented (Stage 3)');
+): Promise<Blob> {
+  const chunks: Uint8Array[] = [];
+  let bytesWritten = 0;
+
+  return new Promise((resolve, reject) => {
+    const zip = new Zip((err, data, final) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      if (data) {
+        chunks.push(data);
+        bytesWritten += data.length;
+        onProgress?.(bytesWritten);
+      }
+      if (final) {
+        const blob = new Blob(chunks as BlobPart[], { type: 'application/zip' });
+        resolve(blob);
+      }
+    });
+
+    // Add each file to the zip
+    for (const file of files) {
+      const fileStream = new ZipDeflate(file.name, { level: 6 });
+      zip.add(fileStream);
+
+      // Read file and push chunks to the zip stream
+      const reader = file.stream().getReader();
+      const pump = () => {
+        reader.read().then(({ done, value }) => {
+          if (done) {
+            fileStream.push(new Uint8Array(0), true);
+            return;
+          }
+          fileStream.push(value);
+          pump();
+        }).catch(reject);
+      };
+      pump();
+    }
+
+    zip.end();
+  });
+}
+
+/**
+ * Create a zip from files with custom paths (for folder structure)
+ */
+export async function createZipFromFilesWithPaths(
+  files: Array<{ path: string; file: File }>,
+  onProgress?: (bytesWritten: number) => void
+): Promise<Blob> {
+  const chunks: Uint8Array[] = [];
+  let bytesWritten = 0;
+
+  return new Promise((resolve, reject) => {
+    const zip = new Zip((err, data, final) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      if (data) {
+        chunks.push(data);
+        bytesWritten += data.length;
+        onProgress?.(bytesWritten);
+      }
+      if (final) {
+        const blob = new Blob(chunks as BlobPart[], { type: 'application/zip' });
+        resolve(blob);
+      }
+    });
+
+    for (const { path, file } of files) {
+      const fileStream = new ZipDeflate(path, { level: 6 });
+      zip.add(fileStream);
+
+      const reader = file.stream().getReader();
+      const pump = () => {
+        reader.read().then(({ done, value }) => {
+          if (done) {
+            fileStream.push(new Uint8Array(0), true);
+            return;
+          }
+          fileStream.push(value);
+          pump();
+        }).catch(reject);
+      };
+      pump();
+    }
+
+    zip.end();
+  });
 }
 
 /**
