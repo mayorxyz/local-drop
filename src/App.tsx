@@ -12,6 +12,7 @@ export default function App() {
   const [page, setPage] = useState<Page>('home');
   const [channel, setChannel] = useState<RTCDataChannel | null>(null);
   const [role, setRole] = useState<'sender' | 'receiver'>('sender');
+  const [peerDeviceName, setPeerDeviceName] = useState<string>('');
   const [theme, setTheme] = useState<Theme>(getThemePreference());
   const [isDark, setIsDark] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
@@ -55,18 +56,20 @@ export default function App() {
     setTimeout(() => setToast(null), 3000);
   }, []);
 
-  const handleSendConnected = useCallback((ch: RTCDataChannel) => {
+  const handleSendConnected = useCallback((ch: RTCDataChannel, peerName?: string) => {
     setChannel(ch);
     setRole('sender');
+    setPeerDeviceName(peerName || '');
     setPage('connected');
-    showToast('Connected! Ready to send files.');
+    showToast(`Connected to ${peerName || 'peer'}! Ready to send files.`);
   }, [showToast]);
 
-  const handleReceiveConnected = useCallback((ch: RTCDataChannel) => {
+  const handleReceiveConnected = useCallback((ch: RTCDataChannel, peerName?: string) => {
     setChannel(ch);
     setRole('receiver');
+    setPeerDeviceName(peerName || '');
     setPage('connected');
-    showToast('Connected! Ready to receive files.');
+    showToast(`Connected to ${peerName || 'peer'}! Ready to receive files.`);
   }, [showToast]);
 
   const handleDisconnect = useCallback(() => {
@@ -118,6 +121,7 @@ export default function App() {
         <Connected
           channel={channel}
           role={role}
+          peerDeviceName={peerDeviceName}
           onDisconnect={handleDisconnect}
         />
       )}

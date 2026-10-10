@@ -1,12 +1,15 @@
 import { useState, useCallback, useRef } from 'react';
 import { PeerConnection, ConnectionState } from '../lib/peer';
 import { createAnswerPayload, decodePayload, parseFrame, reassembleFrames, QRFrame } from '../lib/signaling';
+import { getDeviceName } from '../lib/storage';
 import { QRShow } from '../components/QRShow';
 import { QRScan } from '../components/QRScan';
 import { PasteCode } from '../components/PasteCode';
+import { DeviceBadge } from '../components/DeviceBadge';
+import { StatusBar } from '../components/StatusBar';
 
 interface ReceiveProps {
-  onConnected: (channel: RTCDataChannel) => void;
+  onConnected: (channel: RTCDataChannel, peerDeviceName?: string) => void;
   onBack: () => void;
 }
 
@@ -47,7 +50,34 @@ export function Receive({ onConnected, onBack }: ReceiveProps) {
         const checkOpen = setInterval(() => {
           if (channel.readyState === 'open') {
             clearInterval(checkOpen);
-            onConnected(channel);
+            
+            // Set up device name exchange
+            const deviceName = getDeviceName();
+            let peerDeviceName = '';
+            
+            const handleMessage = (event: MessageEvent) => {
+              try {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'hello' && msg.deviceName) {
+                  peerDeviceName = msg.deviceName;
+                  // Send our device name back
+                  channel.send(JSON.stringify({ type: 'hello-response', deviceName }));
+                  channel.removeEventListener('message', handleMessage);
+                  onConnected(channel, peerDeviceName);
+                }
+              } catch (e) {
+                // Ignore non-JSON messages
+              }
+            };
+            
+            channel.addEventListener('message', handleMessage);
+            
+            // Timeout for device name exchange
+            setTimeout(() => {
+              channel.removeEventListener('message', handleMessage);
+              // Even if no response, proceed with connection
+              onConnected(channel, peerDeviceName || 'Unknown');
+            }, 3000);
           }
         }, 100);
         setTimeout(() => clearInterval(checkOpen), 15000);
@@ -93,16 +123,17 @@ export function Receive({ onConnected, onBack }: ReceiveProps) {
   return (
     <div className="flex flex-col items-center min-h-[100dvh] px-4 py-6">
       {/* Header */}
-      <div className="flex items-center justify-between w-full max-w-md mb-6">
+      <div className="flex items-center justify-between w-full max-w-md mb-4">
         <button onClick={onBack} className="p-2 text-slate-400 hover:text-slate-200 transition-colors">
           ← Back
         </button>
-        <h2 className="text-lg font-semibold text-slate-200">Receive Files</h2>
-        <div className="w-10" />
+        <DeviceBadge editable={false} />
       </div>
 
+      <h2 className="text-lg font-semibold text-slate-200 mb-4">Receive Files</h2>
+
       {/* Step indicator */}
-      <div className="flex items-center gap-2 mb-6">
+      <div className="flex items-center gap-2 mb-4">
         <div className={`flex items-center gap-1 px-3 py-1 rounded-full text-xs font-medium ${step === 1 ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-400'}`}>
           <span>1</span>
           <span>Scan offer</span>
@@ -116,24 +147,7 @@ export function Receive({ onConnected, onBack }: ReceiveProps) {
 
       {/* Connection state */}
       <div className="mb-4">
-        <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${
-          state === 'connected' ? 'bg-green-900/50 text-green-300' :
-          state === 'connecting' ? 'bg-yellow-900/50 text-yellow-300' :
-          state === 'failed' ? 'bg-red-900/50 text-red-300' :
-          'bg-slate-800 text-slate-400'
-        }`}>
-          <span className={`w-2 h-2 rounded-full ${
-            state === 'connected' ? 'bg-green-400' :
-            state === 'connecting' ? 'bg-yellow-400 animate-pulse' :
-            state === 'failed' ? 'bg-red-400' :
-            'bg-slate-500'
-          }`} />
-          {state === 'connected' ? 'Connected' :
-           state === 'connecting' ? 'Connecting...' :
-           state === 'failed' ? 'Failed' :
-           state === 'disconnected' ? 'Disconnected' :
-           'Waiting for offer'}
-        </span>
+        <StatusBar state={state} />
       </div>
 
       {/* Error */}

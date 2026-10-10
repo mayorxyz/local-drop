@@ -5,6 +5,7 @@ import { FileList } from '../components/FileList';
 interface ConnectedProps {
   channel: RTCDataChannel;
   role: 'sender' | 'receiver';
+  peerDeviceName?: string;
   onDisconnect: () => void;
 }
 
@@ -15,7 +16,7 @@ interface ReceivedFile {
   size: number;
 }
 
-export function Connected({ channel, role, onDisconnect }: ConnectedProps) {
+export function Connected({ channel, role, peerDeviceName, onDisconnect }: ConnectedProps) {
   const [transfers, setTransfers] = useState<TransferProgress[]>([]);
   const [pendingFiles, setPendingFiles] = useState<{ id: string; name: string; size: number }[]>([]);
   const [receivedFiles, setReceivedFiles] = useState<ReceivedFile[]>([]);
@@ -132,7 +133,7 @@ export function Connected({ channel, role, onDisconnect }: ConnectedProps) {
         <div className="flex items-center gap-2">
           <span className={`w-2 h-2 rounded-full ${channel.readyState === 'open' ? 'bg-green-400' : 'bg-red-400'}`} />
           <span className="text-sm text-slate-300">
-            {role === 'sender' ? 'Sender' : 'Receiver'}
+            {peerDeviceName ? `Connected to ${peerDeviceName}` : (role === 'sender' ? 'Sender' : 'Receiver')}
           </span>
         </div>
         <div className="flex items-center gap-1">
