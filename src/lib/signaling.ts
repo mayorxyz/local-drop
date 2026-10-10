@@ -21,6 +21,16 @@ function base64urlDecode(str: string): Uint8Array {
 }
 
 /**
+ * A single candidate in compact form:
+ * [foundation, ip, port, priority]
+ * - foundation: string (e.g. "1", "abc123")
+ * - ip: string (IPv4 or mDNS .local)
+ * - port: number
+ * - priority: number (ICE priority)
+ */
+export type CompactCandidate = [string, string, number, number];
+
+/**
  * Compact SDP descriptor format
  * Contains only essential ICE information needed to establish connection
  */
@@ -29,9 +39,9 @@ export interface CompactSDP {
   t: 'o' | 'a'; // type: offer or answer
   u: string; // ice-ufrag
   p: string; // ice-pwd
-  f: string; // fingerprint (hex string without colons)
+  f: string; // fingerprint (hex string without colons, UPPERCASE)
   s: string; // setup role: 'active', 'passive', or 'actpass'
-  c: Array<[string, number]>; // candidates: [[ip, port], ...] max 3
+  c: CompactCandidate[]; // candidates: [[foundation, ip, port, priority], ...] max 3
 }
 
 /**
@@ -70,7 +80,7 @@ export function parseSDP(sdp: string, type: 'o' | 'a'): CompactSDP {
   let icePwd = '';
   let fingerprint = '';
   let setup = '';
-  const candidates: Array<[string, number]> = [];
+  const candidates: CompactCandidate[] = [];
   
   for (const line of lines) {
     if (line.startsWith('a=ice-ufrag:')) {
@@ -78,21 +88,27 @@ export function parseSDP(sdp: string, type: 'o' | 'a'): CompactSDP {
     } else if (line.startsWith('a=ice-pwd:')) {
       icePwd = line.substring('a=ice-pwd:'.length);
     } else if (line.startsWith('a=fingerprint:sha-256 ')) {
-      // Extract fingerprint and remove colons
+      // Extract fingerprint, remove colons, normalize to UPPERCASE
       const fp = line.substring('a=fingerprint:sha-256 '.length);
-      fingerprint = fp.replace(/:/g, '');
+      fingerprint = fp.replace(/:/g, '').toUpperCase();
     } else if (line.startsWith('a=setup:')) {
       setup = line.substring('a=setup:'.length);
     } else if (line.startsWith('a=candidate:')) {
-      // Parse candidate: a=candidate:foundation component protocol priority address port typ type ...
-      const parts = line.substring('a=candidate:'.length).split(' ');
-      if (parts.length >= 5) {
+      // Parse: a=candidate:<foundation> <component> <protocol> <priority> <address> <port> typ <type> ...
+      const afterPrefix = line.substring('a=candidate:'.length);
+      const parts = afterPrefix.split(' ');
+      // parts[0]=foundation, parts[1]=component, parts[2]=protocol,
+      // parts[3]=priority, parts[4]=address, parts[5]=port, parts[6]="typ", parts[7]=type
+      if (parts.length >= 8) {
+        const foundation = parts[0];
+        const priority = parseInt(parts[3], 10);
         const address = parts[4];
         const port = parseInt(parts[5], 10);
+        const candType = parts[7];
         
         // Only keep host candidates, skip IPv6 link-local
-        if (parts.includes('host') && !address.startsWith('fe80:')) {
-          candidates.push([address, port]);
+        if (candType === 'host' && !address.startsWith('fe80:')) {
+          candidates.push([foundation, address, port, priority]);
           if (candidates.length >= 3) break; // Max 3 candidates
         }
       }
@@ -122,12 +138,29 @@ export function parseSDP(sdp: string, type: 'o' | 'a'): CompactSDP {
 }
 
 /**
- * Rebuild full SDP from compact descriptor
+ * Format fingerprint hex string (64 chars) as uppercase hex pairs joined by ":"
+ * e.g. "AABBCCDD..." -> "AA:BB:CC:DD:..."
+ */
+function formatFingerprint(hex: string): string {
+  const upper = hex.toUpperCase();
+  const pairs: string[] = [];
+  for (let i = 0; i < upper.length; i += 2) {
+    pairs.push(upper.substring(i, i + 2));
+  }
+  return pairs.join(':');
+}
+
+/**
+ * Rebuild full SDP from compact descriptor.
+ * Produces a data-channel-only SDP compatible with Chrome.
  */
 export function rebuildSDP(descriptor: CompactSDP): string {
+  const sessionId = Math.floor(Math.random() * 1e9);
+  const fingerprintFormatted = formatFingerprint(descriptor.f);
+  
   const lines: string[] = [
     'v=0',
-    'o=- ' + Math.floor(Math.random() * 1e9) + ' 2 IN IP4 127.0.0.1',
+    `o=- ${sessionId} 2 IN IP4 127.0.0.1`,
     's=-',
     't=0 0',
     'a=group:BUNDLE 0',
@@ -135,18 +168,17 @@ export function rebuildSDP(descriptor: CompactSDP): string {
     'c=IN IP4 0.0.0.0',
     'a=ice-ufrag:' + descriptor.u,
     'a=ice-pwd:' + descriptor.p,
-    'a=fingerprint:sha-256 ' + descriptor.f.match(/.{1,2}/g)!.join(':'),
+    'a=fingerprint:sha-256 ' + fingerprintFormatted,
     'a=setup:' + descriptor.s,
     'a=mid:0',
     'a=sctp-port:5000',
     'a=max-message-size:262144',
   ];
   
-  // Add candidates
-  for (let i = 0; i < descriptor.c.length; i++) {
-    const [ip, port] = descriptor.c[i];
-    // Foundation, component (1=RTP), protocol (udp), priority, address, port, typ, type
-    lines.push(`a=candidate:${i + 1} 1 udp 2122260223 ${ip} ${port} typ host generation 0`);
+  // Add candidates using original foundation and priority
+  // Format: a=candidate:<foundation> 1 udp <priority> <ip> <port> typ host
+  for (const [foundation, ip, port, priority] of descriptor.c) {
+    lines.push(`a=candidate:${foundation} 1 udp ${priority} ${ip} ${port} typ host`);
   }
   
   const sdp = lines.join('\r\n') + '\r\n';

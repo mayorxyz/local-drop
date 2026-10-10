@@ -21,9 +21,9 @@ describe('signaling', () => {
         t: 'o',
         u: 'testufrag',
         p: 'testpwd123',
-        f: 'aabbccdd',
+        f: 'AABBCCDD',
         s: 'actpass',
-        c: [['192.168.1.1', 12345]],
+        c: [['1', '192.168.1.1', 12345, 2122260223]],
       };
       const encoded = encodePayload(descriptor);
       const decoded = decodePayload(encoded);
@@ -36,12 +36,12 @@ describe('signaling', () => {
         t: 'a',
         u: 'ufrag',
         p: 'pwd',
-        f: 'fingerprint',
+        f: 'AABBCCDD',
         s: 'active',
         c: [
-          ['192.168.1.1', 12345],
-          ['192.168.1.2', 12346],
-          ['abc.local', 12347],
+          ['1', '192.168.1.1', 12345, 2122260223],
+          ['2', '192.168.1.2', 12346, 2122260224],
+          ['3', 'abc.local', 12347, 2122260225],
         ],
       };
       const encoded = encodePayload(descriptor);
@@ -71,9 +71,9 @@ describe('signaling', () => {
         t: 'o',
         u: 'abc123',
         p: 'pwd123456789',
-        f: 'aabbccddeeff00112233445566778899',
+        f: 'AABBCCDDEEFF00112233445566778899',
         s: 'actpass',
-        c: [['192.168.1.1', 12345]],
+        c: [['1', '192.168.1.1', 12345, 2122260223]],
       };
       const encoded = encodePayload(descriptor);
       expect(encoded.length).toBeLessThan(250);
@@ -97,10 +97,10 @@ describe('signaling', () => {
       'a=sctp-port:5000',
       'a=max-message-size:262144',
       'a=candidate:1 1 udp 2122260223 192.168.1.100 54321 typ host generation 0',
-      'a=candidate:2 1 udp 2122260223 192.168.1.101 54322 typ host generation 0',
+      'a=candidate:2 1 udp 2122260224 192.168.1.101 54322 typ host generation 0',
     ].join('\r\n') + '\r\n';
 
-    it('should parse SDP and extract compact descriptor', () => {
+    it('should parse SDP and extract compact descriptor with foundation and priority', () => {
       const descriptor = parseSDP(sampleOfferSDP, 'o');
       expect(descriptor.v).toBe(1);
       expect(descriptor.t).toBe('o');
@@ -109,11 +109,12 @@ describe('signaling', () => {
       expect(descriptor.f).toBe('AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899');
       expect(descriptor.s).toBe('actpass');
       expect(descriptor.c.length).toBe(2);
-      expect(descriptor.c[0]).toEqual(['192.168.1.100', 54321]);
-      expect(descriptor.c[1]).toEqual(['192.168.1.101', 54322]);
+      // [foundation, ip, port, priority]
+      expect(descriptor.c[0]).toEqual(['1', '192.168.1.100', 54321, 2122260223]);
+      expect(descriptor.c[1]).toEqual(['2', '192.168.1.101', 54322, 2122260224]);
     });
 
-    it('should rebuild SDP from descriptor', () => {
+    it('should rebuild SDP with properly formatted fingerprint', () => {
       const descriptor: CompactSDP = {
         v: 1,
         t: 'o',
@@ -121,7 +122,7 @@ describe('signaling', () => {
         p: 'testpwd',
         f: 'AABBCCDD',
         s: 'actpass',
-        c: [['192.168.1.1', 12345]],
+        c: [['1', '192.168.1.1', 12345, 2122260223]],
       };
       const sdp = rebuildSDP(descriptor);
       
@@ -130,10 +131,13 @@ describe('signaling', () => {
       expect(sdp).toContain('a=ice-pwd:testpwd');
       expect(sdp).toContain('a=fingerprint:sha-256 AA:BB:CC:DD');
       expect(sdp).toContain('a=setup:actpass');
-      expect(sdp).toContain('a=candidate:1 1 udp 2122260223 192.168.1.1 12345 typ host generation 0');
+      // Candidate uses original foundation and priority
+      expect(sdp).toContain('a=candidate:1 1 udp 2122260223 192.168.1.1 12345 typ host');
+      // Ends with \r\n
+      expect(sdp.endsWith('\r\n')).toBe(true);
     });
 
-    it('should round trip SDP -> descriptor -> SDP', () => {
+    it('should round trip SDP -> descriptor -> SDP preserving foundation/priority', () => {
       const descriptor = parseSDP(sampleOfferSDP, 'o');
       const rebuiltSDP = rebuildSDP(descriptor);
       
@@ -141,8 +145,11 @@ describe('signaling', () => {
       expect(rebuiltSDP).toContain('a=ice-ufrag:testufrag');
       expect(rebuiltSDP).toContain('a=ice-pwd:testpassword123');
       expect(rebuiltSDP).toContain('a=setup:actpass');
-      expect(rebuiltSDP).toContain('192.168.1.100 54321');
-      expect(rebuiltSDP).toContain('192.168.1.101 54322');
+      // Foundation and priority preserved
+      expect(rebuiltSDP).toContain('a=candidate:1 1 udp 2122260223 192.168.1.100 54321 typ host');
+      expect(rebuiltSDP).toContain('a=candidate:2 1 udp 2122260224 192.168.1.101 54322 typ host');
+      // Fingerprint properly formatted
+      expect(rebuiltSDP).toContain('a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF:00:11');
     });
 
     it('should filter out IPv6 link-local candidates', () => {
@@ -163,7 +170,7 @@ describe('signaling', () => {
 
       const descriptor = parseSDP(sdpWithIPv6, 'o');
       expect(descriptor.c.length).toBe(1);
-      expect(descriptor.c[0][0]).toBe('192.168.1.1');
+      expect(descriptor.c[0][1]).toBe('192.168.1.1');
     });
 
     it('should limit candidates to max 3', () => {
@@ -187,6 +194,38 @@ describe('signaling', () => {
 
       const descriptor = parseSDP(sdpWithManyCandidates, 'o');
       expect(descriptor.c.length).toBe(3);
+    });
+
+    it('should normalize fingerprint to uppercase', () => {
+      const sdp = [
+        'v=0',
+        'o=- 123456 2 IN IP4 127.0.0.1',
+        's=-',
+        't=0 0',
+        'm=application 9 UDP/DTLS/SCTP webrtc-datachannel',
+        'c=IN IP4 0.0.0.0',
+        'a=ice-ufrag:test',
+        'a=ice-pwd:test',
+        'a=fingerprint:sha-256 aa:bb:cc:dd',
+        'a=setup:actpass',
+      ].join('\r\n') + '\r\n';
+
+      const descriptor = parseSDP(sdp, 'o');
+      expect(descriptor.f).toBe('AABBCCDD');
+    });
+
+    it('should format fingerprint with colons when rebuilding', () => {
+      const descriptor: CompactSDP = {
+        v: 1,
+        t: 'o',
+        u: 'u',
+        p: 'p',
+        f: 'AABBCCDDEEFF',
+        s: 'actpass',
+        c: [],
+      };
+      const sdp = rebuildSDP(descriptor);
+      expect(sdp).toContain('a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF');
     });
   });
 
